@@ -154,5 +154,5 @@ def write_tests():
 
 
 if __name__ == "__main__":
-    # test()
-    write_tests()
+    test()
+    # write_tests()
