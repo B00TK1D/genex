@@ -1,0 +1,3 @@
+1. Try initial guess of min_len/2 search_len
+2. Check if there is a shared substring of length search_len between input[0] and input[1]
+3. If there is, check if that same string is present in input[2]

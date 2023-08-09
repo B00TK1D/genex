@@ -1,0 +1,10 @@
+POST /cgi-bin/process.cgi HTTP/1.1
+User-Agent: Mozilla/1.9
+Host: 10.60.0.1
+Content-Type: application/x-www-form-urlencoded
+Content-Length: 34
+Accept-Language: en-us
+Accept-Encoding: gzip, deflate
+Connection: Keep-Alive
+
+username=zlujul&password=qmxykdmog
