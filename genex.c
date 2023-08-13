@@ -29,6 +29,7 @@ void print_escaped(char* s, unsigned long len) {
     for (unsigned long i = 0; i < len; i++) {
         switch (s[i]) {
             case '\\':
+            case '/':
             case '.':
             case '*':
             case '+':
@@ -159,9 +160,19 @@ void print_options(struct input_struct input, unsigned long* lengths) {
     putchar('(');
     putchar('[');
     unsigned char i = 0;
+    char in_range = 0;
     while(1) {
-        if (chars_present[i]) {
+        if (in_range) {
+            if (!chars_present[i]) {
+                putchar('-');
+                i--;
+                print_escaped((char*) &i, 1);
+                i++;
+                in_range = 0;
+            }
+        } else if (chars_present[i]) {
             print_escaped((char*)&i, 1);
+            in_range = 1;
         }
         if (++i == 0) {
             break;
@@ -312,7 +323,6 @@ int main (int argc, char** argv) {
             }
             source_type = 1;
             source = optarg;
-            printf("Reading from directory %s\n", optarg);
             break;
         case 'f':
             arg_count += 2;
@@ -322,7 +332,6 @@ int main (int argc, char** argv) {
             }
             source_type = 2;
             source = optarg;
-            printf("Reading from file %s\n", optarg);
             break;
         default:
             print_help(argv[0]);
@@ -359,7 +368,6 @@ int main (int argc, char** argv) {
                 if (entry->d_type == DT_REG) {
                     char* filename = malloc(sizeof(char) * FILENAME_MAX);
                     snprintf(filename, FILENAME_MAX, "%s/%s", source, entry->d_name);
-                    printf("Reading from file %s\n", filename);
                     FILE* file = fopen(filename, "r");
                     if (!file) {
                         fprintf(stderr, "Error: Could not open file %s\n", filename);
@@ -378,9 +386,40 @@ int main (int argc, char** argv) {
             }
             break;
         }
-        case 2:
-            exit(EXIT_SUCCESS);
-        default:
+        case 2: {
+            // read each line of the file into an entry in inputs
+            // First, open the file
+            FILE* file = fopen(source, "r");
+            if (!file) {
+                fprintf(stderr, "Error: Could not open file %s\n", source);
+                exit(EXIT_FAILURE);
+            }
+            // Then, count the number of lines in the file
+            char c;
+            while ((c = fgetc(file)) != EOF) {
+                if (c == '\n') {
+                    input_count++;
+                }
+            }
+            // Then, allocate the inputs array
+            inputs = malloc(sizeof(char*) * input_count);
+            // Then, read each line into an entry in inputs
+            rewind(file);
+            unsigned long i = 0;
+            unsigned long line_start = 0;
+            // Use strtok
+            char* line = NULL;
+            size_t line_len = 0;
+            while (getline(&line, &line_len, file) != -1) {
+                inputs[i] = malloc(sizeof(char) * (line_len + 1));
+                strcpy(inputs[i], line);
+                inputs[i][line_len] = '\0';
+                i++;
+            }
+            fclose(file);
+            break;
+        }
+        default: {
             if (argc - arg_count < 1) {
                 fprintf(stderr, "Error: No input provided - provide inputs strings as arguments, or specify -d or -f to read from a directory or a file\n");
                 exit(EXIT_FAILURE);
@@ -388,11 +427,9 @@ int main (int argc, char** argv) {
             inputs = argv + arg_count;
             input_count = argc - arg_count;
             break;
+        }
     }
     struct input_struct input = {input_count, inputs};
-
-    printf("Processing %lu inputs\n", input.count);
-    fflush(stdout);
 
     process(input);
 
