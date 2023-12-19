@@ -37,8 +37,13 @@ def generate_random_long_http_inputs(n = 5):
 
 
 def main():
-    inputs = "\n".join(generate_random_json_inputs(1000))
-    print(inputs)
+    # inputs = "\n".join(generate_random_json_inputs(1000))
+    # print(inputs)
+    inputs = generate_random_long_http_inputs(1000)
+    # Write inputs to tests/long_http_1000 folder, one per file
+    for i in range(len(inputs)):
+        with open("tests/long_http_1000/" + str(i) + ".txt", "w") as f:
+            f.write(inputs[i])
 
 
 if __name__ == "__main__":

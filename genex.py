@@ -135,12 +135,12 @@ def test():
     # inputs = generate_random_json_inputs(10000)
     inputs = generate_random_long_http_inputs(1000)
 
-    print("inputs:")
-    for i in inputs:
-        print(i)
-    print()
+    # print("inputs:")
+    # for i in inputs:
+    #     print(i)
+    # print()
 
-    print("regex:")
+    # print("regex:")
     result = analyze(inputs)
 
     print(result)
