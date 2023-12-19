@@ -18,7 +18,7 @@ func print_options(input input_struct, lengths []int) {
 	for i := 0; i < input.count; i++ {
 		fmt.Print(input.strings[i])
 		if i < input.count-1 {
-			fmt.Print(", ")
+			fmt.Print("|")
 		}
 	}
 	fmt.Print(")")
