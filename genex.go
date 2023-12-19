@@ -3,34 +3,53 @@ package main
 import "fmt"
 
 const MaxUint = ^uint(0)
-const MinUint = 0
 const MaxInt = int(MaxUint >> 1)
-const MinInt = -MaxInt - 1
 
-type input_struct struct {
+type genexInput struct {
 	count   int
-	strings []string
+	strings [][]byte
 }
 
-func print_options(input input_struct, lengths []int) {
+type genexField struct {
+	key    []byte
+	values [][]byte
+}
+
+type genexOutput struct {
+	fields []genexField
+}
+
+func print_options(input genexInput, lengths []int) {
 	// Print the options
 	fmt.Print("(")
 	for i := 0; i < input.count; i++ {
-		fmt.Print(input.strings[i])
+		fmt.Print(string(input.strings[i]))
 		if i < input.count-1 {
 			fmt.Print("|")
 		}
 	}
 	fmt.Print(")")
+
+	// Check if the key already exists
+	// if len((*output).fields) == 0 {
+	// 	(*output).fields = append((*output).fields, genexField{key: []byte{}, values: make([][]byte, 0)})
+	// }
+	// // Save to output
+	// for i := 0; i < input.count; i++ {
+	// 	(*output).fields[len((*output).fields)-1].values[i] = []byte(input.strings[i][:lengths[i]])
+	// }
 }
 
-func print_escaped(str string, len int) {
+func print_escaped(str []byte, len int) {
 	for i := 0; i < len; i++ {
 		fmt.Print(string(str[i]))
 	}
+
+	// Create a new key
+	//field := genexField{key: []byte{}, values: make([][]byte, 0)}
 }
 
-func longest_common_substring(input input_struct, min_len int, lengths []int, match_indices *[]int) int {
+func longest_common_substring(input genexInput, min_len int, lengths []int, match_indices *[]int) int {
 	tmp_match_indices := make([]int, input.count)
 	matched_len := 0
 	upper_bound := min_len
@@ -47,7 +66,14 @@ func longest_common_substring(input input_struct, min_len int, lengths []int, ma
 			start_index_2 = 0
 			subset_index = input.count - 1
 			for start_index_2 <= lengths[subset_index]-subset_len && subset_index > 0 {
-				if input.strings[0][start_index_1:start_index_1+subset_len] == input.strings[subset_index][start_index_2:start_index_2+subset_len] {
+				equal := true
+				for check_index := 0; check_index < subset_len; check_index++ {
+					if input.strings[0][start_index_1+check_index] != input.strings[subset_index][start_index_2+check_index] {
+						equal = false
+						break
+					}
+				}
+				if equal {
 					tmp_match_indices[subset_index] = start_index_2
 					subset_index--
 					start_index_2 = 0
@@ -75,7 +101,7 @@ func longest_common_substring(input input_struct, min_len int, lengths []int, ma
 	return matched_len
 }
 
-func process(input input_struct) int {
+func process(input genexInput) int {
 	min_len := MaxInt
 	lengths := make([]int, input.count)
 	for i := 0; i < input.count; i++ {
@@ -94,7 +120,7 @@ func process(input input_struct) int {
 	}
 
 	nonempty := false
-	recurseInput := input_struct{count: input.count, strings: make([]string, input.count)}
+	recurseInput := genexInput{count: input.count, strings: make([][]byte, input.count)}
 	for i := 0; i < input.count; i++ {
 		if !nonempty && match_indices[i] > 0 {
 			nonempty = true
@@ -122,8 +148,8 @@ func process(input input_struct) int {
 }
 
 func main() {
-	input1 := "{'name': 'Sam Smith', 'age': 30, 'car': 'Chevy'}"
-	input2 := "{'name': 'John Rogers', 'age': 25, 'car': 'Ford'}"
-	input := input_struct{count: 2, strings: []string{input1, input2}}
+	input1 := []byte("{'name': 'Sam Smith', 'age': 30, 'car': 'Chevy'}")
+	input2 := []byte("{'name': 'John Rogers', 'age': 25, 'car': 'Ford'}")
+	input := genexInput{count: 2, strings: [][]byte{input1, input2}}
 	process(input)
 }
