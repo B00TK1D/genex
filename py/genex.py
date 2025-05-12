@@ -81,7 +81,7 @@ def build_regex(inputs: str):
 
     if search_len < 2:
         return "(" + "|".join(inputs.split("\n")) + ")"
-    
+
     regex = r"(.*?)(.{" + str(search_len-1) + r",})(.*)" + (r"\n(.*?)\2(.*)" * input_count)
     shared = re.sub(regex, r"\2", inputs)
     pre_regex = r"\g<1>"
@@ -105,7 +105,7 @@ def generalize(regex: str):
         "A-Z",
         "0-9",
     ]
-    
+
     # Extract everything inside capture groups (this is a complicatd regex because it has to deal with escaped parentheses, and escaped backslashes)
     groups = re.findall(r"\(((?:[^\)\\]|\\\)|\\\\)*)\)", regex)
     for group in groups:
@@ -125,7 +125,7 @@ def generalize(regex: str):
     regex = re.sub(r"\{0,1\}", r"?", regex)
     regex = re.sub(r"\{1,1\}", r"", regex)
     regex = re.sub(r"\{(\d+)\,\1\}", r"{\1}", regex)
-    
+
     return regex
 
 
