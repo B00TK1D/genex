@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <limits.h>
 
 // Define a struct to hold the input_count and inputs array
 // (Helps with limiting function parameters to 4 or under, to avoid the overhead of passing arguments via the stack)
@@ -233,16 +234,26 @@ unsigned long longest_commong_substring(struct input_struct input, int min_len, 
 
 // Minimize the distance between the substrings
 unsigned long minimize_distance(struct input_struct input, unsigned long* lengths, unsigned long* match_indices, unsigned long matched_len) {
+    unsigned long max_length = 0;
+    for (unsigned long i = 0; i < input.count; i++) {
+        if (lengths[i] > max_length) {
+            max_length = lengths[i];
+        }
+    }
+
     // Generate list of indices of matches
     unsigned long** match_indices_list = malloc(sizeof(unsigned long) * input.count);
     unsigned long* match_counts = malloc(sizeof(unsigned long) * input.count);
     // Allocate a temporary array for holding list of matches
-    unsigned long* tmp_match_indices = malloc(sizeof(unsigned long) * input.count);
+    unsigned long* tmp_match_indices = malloc(sizeof(unsigned long) * max_length);
     unsigned long tmp_match_count = 0;
+    unsigned long* current_match_indices = malloc(sizeof(unsigned long) * input.count);
+    unsigned long* best_match_indices = malloc(sizeof(unsigned long) * input.count);
+
 
     for (unsigned long i = 0; i < input.count; i++) {
         // Find all occurances of the substring in the string
-        for (unsigned long j = 0; j < lengths[i] - matched_len; j++) {
+        for (unsigned long j = 0; j <= lengths[i] - matched_len; j++) {
             if (memcmp(input.strings[i] + j, input.strings[0] + match_indices[0], matched_len) == 0) {
                 tmp_match_indices[tmp_match_count++] = j;
             }
@@ -251,17 +262,61 @@ unsigned long minimize_distance(struct input_struct input, unsigned long* length
         match_indices_list[i] = malloc(sizeof(unsigned long) * tmp_match_count);
         // Copy the matches into the match_indices_list array
         memcpy(match_indices_list[i], tmp_match_indices, sizeof(unsigned long) * tmp_match_count);
+
+        current_match_indices[i] = tmp_match_indices[tmp_match_count - 1];
         match_counts[i] = tmp_match_count;
         tmp_match_count = 0;
     }
+    memcpy(best_match_indices, current_match_indices, sizeof(unsigned long) * input.count);
 
-    unsigned long min_distance = -1;
-    unsigned long current_distance = 0;
-    for (unsigned long level = 0; level < input.count; level++) {
-        for (unsigned long match_index = 0; match_index < match_counts[level]; match_index++) {
+    unsigned long min_distance = ULONG_MAX;
+    unsigned long current_min;
+    unsigned long current_max;
+    unsigned long current_max_index;
+    while (1) {
+        current_min = ULONG_MAX;
+        current_max = 0;
+        current_max_index = 0;
 
+        for (unsigned long i = 0; i < input.count; i++) {
+            if (current_match_indices[i] < current_min) {
+                current_min = current_match_indices[i];
+            }
+            if (current_match_indices[i] > current_max) {
+                current_max = current_match_indices[i];
+            }
+            if (current_match_indices[i] > current_match_indices[current_max_index]) {
+                current_max_index = i;
+            }
         }
+
+
+        if (current_max - current_min < min_distance) {
+            min_distance = current_max - current_min;
+            memcpy(match_indices, current_match_indices, sizeof(unsigned long) * input.count);
+        }
+
+        if (match_counts[current_max_index] == 0) {
+            for (unsigned long i = 0; i < input.count; i++) {
+                free(match_indices_list[i]);
+            }
+            free(match_indices_list);
+            free(match_counts);
+            free(tmp_match_indices);
+
+            return min_distance;
+        }
+
+        current_match_indices[current_max_index] = match_indices_list[current_max_index][--match_counts[current_max_index]];
     }
+
+    for (unsigned long i = 0; i < input.count; i++) {
+        free(match_indices_list[i]);
+    }
+    free(match_indices_list);
+    free(match_counts);
+    free(tmp_match_indices);
+    return 0;
 }
 
 
@@ -281,6 +336,7 @@ int process(struct input_struct input) {
 
     unsigned long* match_indices = malloc(sizeof(unsigned long) * (input.count));
     unsigned long matched_len = longest_commong_substring(input, min_len, lengths, match_indices);
+    minimize_distance(input, lengths, match_indices, matched_len);
 
     if (matched_len == 0) {
         print_options(input, lengths);
@@ -464,10 +520,10 @@ int main (int argc, char** argv) {
     }
     struct input_struct input = {input_count, inputs};
 
-    for (int i = 0; i < 10000; i++) {
-        process(input);
-    }
-    //process(input);
+    //for (int i = 0; i < 10000; i++) {
+    //    process(input);
+    //}
+    process(input);
 
     exit(EXIT_SUCCESS);
 }
