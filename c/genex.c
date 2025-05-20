@@ -414,9 +414,6 @@ int process(struct input_struct input) {
         }
     }
 
-    printf("Next\n");
-    fflush(stdout);
-
     if (lcs_len == 0) {
         print_options(input, lengths);
         free(lengths);
