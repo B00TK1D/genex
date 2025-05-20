@@ -173,7 +173,7 @@ void print_options(struct input_struct input, unsigned long* lengths) {
             }
         } else if (chars_present[i]) {
             print_escaped((char*)&i, 1);
-            if (i > 0 && chars_present[i - 1]) {
+            if (i < 255 && chars_present[i + 1]) {
               in_range = 1;
             }
         }
@@ -399,7 +399,7 @@ int process(struct input_struct input) {
         }
     }
 
-    unsigned long* lcs_options = malloc(sizeof(unsigned long) * (input.count));
+    unsigned long* lcs_options = malloc(sizeof(unsigned long) * lengths[0]);
     unsigned long lcs_count = 0;
     unsigned long lcs_len = longest_common_substring(input, min_len, lengths, &lcs_count, lcs_options);
 
@@ -413,6 +413,9 @@ int process(struct input_struct input) {
             memcpy(lcs_indices, temp_lcs_indices, sizeof(unsigned long) * input.count);
         }
     }
+
+    printf("Next\n");
+    fflush(stdout);
 
     if (lcs_len == 0) {
         print_options(input, lengths);
