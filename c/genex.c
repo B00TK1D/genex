@@ -376,25 +376,36 @@ void pre_process(struct input_struct* input, struct processing_struct* data) {
 // Process a set of inputs and print a regex that closely matches all of them
 int process(struct processing_struct* data) {
 
-    printf("Processing depth %lu\n", data->depth);
-    fflush(stdout);
-
-    longest_common_substrings(data);
-
-    unsigned long min_distance = ULONG_MAX;
-    for (unsigned long i = 0; i < data->lcs_count; i++) {
-        data->lcs_index = data->lcs_options[i];
-        unsigned long temp_distance = minimize_distance(data);
-        if (temp_distance < min_distance) {
-            min_distance = temp_distance;
-            memcpy(data->lcs_indices[data->depth], data->tmp_indices, sizeof(unsigned long) * data->input->count);
+    unsigned long min_len = -1;
+    unsigned long* lengths = calloc(input.count, sizeof(unsigned long));
+    for (int i = 0; i < input.count; i++) {
+        while (input.strings[i][lengths[i]]) {
+            lengths[i]++;
+        }
+        if (lengths[i] < min_len) {
+            min_len = lengths[i];
         }
     }
 
+    unsigned long* lcs_options = malloc(sizeof(unsigned long) * lengths[0]);
+    unsigned long lcs_count = 0;
+    unsigned long lcs_len = longest_common_substring(input, min_len, lengths, &lcs_count, lcs_options);
 
-    if (data->lcs_len == 0) {
-        print_options(data->input, data->input->lengths);
-        fflush(stdout);
+    unsigned long min_distance = ULONG_MAX;
+    unsigned long* temp_lcs_indices = malloc(sizeof(unsigned long) * input.count);
+    unsigned long* lcs_indices = malloc(sizeof(unsigned long) * input.count);
+    for (unsigned long i = 0; i < lcs_count; i++) {
+        unsigned long temp_distance = minimize_distance(input, lengths, lcs_options[i], lcs_len, temp_lcs_indices);
+        if (temp_distance < min_distance) {
+            min_distance = temp_distance;
+            memcpy(lcs_indices, temp_lcs_indices, sizeof(unsigned long) * input.count);
+        }
+    }
+
+    if (lcs_len == 0) {
+        print_options(input, lengths);
+        free(lengths);
+        free(lcs_indices);
         return 0;
     }
 
