@@ -5,8 +5,6 @@
 #include <dirent.h>
 #include <limits.h>
 
-#define STATIC_ALLOC_SIZE 1024*1024
-
 // Define a struct to hold the input_count and inputs array
 // (Helps with limiting function parameters to 4 or under, to avoid the overhead of passing arguments via the stack)
 struct input_struct {
@@ -14,27 +12,17 @@ struct input_struct {
     char** strings;
 };
 
-struct output_struct {
-    unsigned long input_count;
-    unsigned long variable_count;
-    char** constants;
-    char*** variables;
-};
-
 char strict = 0;
 char verystrict = 0;
 
 // Help message
 void print_help(char* bin_name) {
-    return;
     printf("Usage: %s [-sSd:f:] [inputs...]\n", bin_name);
     printf("  -s: Strict mode - do not attempt to expand charsets based on statistical analysis and common charsets\n");
     printf("  -S: Very strict mode - do not merge variables from different inputs into combined charsets\n");
     printf("  -d <directory>: Read inputs from a directory (every file in directory is read as its own input)\n");
     printf("  -f <file>: Read inputs from a file (every line in file is read as its own input)\n\n");
 }
-
-void* STATIC_ALLOC[STATIC_ALLOC_SIZE];
 
 
 // Print a string to stdout, including regex special characters, escaping it if necessary.
@@ -185,7 +173,9 @@ void print_options(struct input_struct input, unsigned long* lengths) {
             }
         } else if (chars_present[i]) {
             print_escaped((char*)&i, 1);
-            in_range = 1;
+            if (i > 0 && chars_present[i - 1]) {
+              in_range = 1;
+            }
         }
         if (++i == 0) {
             break;
@@ -198,7 +188,8 @@ void print_options(struct input_struct input, unsigned long* lengths) {
 
 
 // Find the longest common substring among a series of input strings using a binary search for length
-unsigned long longest_commong_substring(struct input_struct input, int min_len, unsigned long* lengths, unsigned long* match_indices, unsigned long* tmp_match_indices) {
+unsigned long longest_commong_substring(struct input_struct input, int min_len, unsigned long* lengths, unsigned long* match_indices) {
+    unsigned long* tmp_match_indices = malloc(sizeof(unsigned long) * (input.count));
     unsigned long matched_len = 0;
     unsigned long upper_bound = min_len;
     unsigned long lower_bound = 1;
@@ -238,6 +229,7 @@ unsigned long longest_commong_substring(struct input_struct input, int min_len, 
             break;
         }
     }
+    free(tmp_match_indices);
 
     return matched_len;
 }
@@ -258,12 +250,11 @@ unsigned long minimize_distance(struct input_struct input, unsigned long* length
     unsigned long* tmp_match_indices = malloc(sizeof(unsigned long) * max_length);
     unsigned long tmp_match_count = 0;
     unsigned long* current_match_indices = malloc(sizeof(unsigned long) * input.count);
-    unsigned long* best_match_indices = malloc(sizeof(unsigned long) * input.count);
 
 
     for (unsigned long i = 0; i < input.count; i++) {
         // Find all occurances of the substring in the string
-        for (unsigned long j = 0; j < lengths[i] - matched_len; j++) {
+        for (unsigned long j = 0; j <= lengths[i] - matched_len; j++) {
             if (memcmp(input.strings[i] + j, input.strings[0] + match_indices[0], matched_len) == 0) {
                 tmp_match_indices[tmp_match_count++] = j;
             }
@@ -277,15 +268,14 @@ unsigned long minimize_distance(struct input_struct input, unsigned long* length
         match_counts[i] = tmp_match_count;
         tmp_match_count = 0;
     }
-    memcpy(best_match_indices, current_match_indices, sizeof(unsigned long) * input.count);
 
     unsigned long min_distance = ULONG_MAX;
     unsigned long current_min;
     unsigned long current_max;
     unsigned long current_max_index;
     while (1) {
-        current_min = 0;
-        current_max = ULONG_MAX;
+        current_min = ULONG_MAX;
+        current_max = 0;
         current_max_index = 0;
 
         for (unsigned long i = 0; i < input.count; i++) {
@@ -300,9 +290,10 @@ unsigned long minimize_distance(struct input_struct input, unsigned long* length
             }
         }
 
+
         if (current_max - current_min < min_distance) {
             min_distance = current_max - current_min;
-            memcpy(best_match_indices, current_match_indices, sizeof(unsigned long) * input.count);
+            memcpy(match_indices, current_match_indices, sizeof(unsigned long) * input.count);
         }
 
         if (match_counts[current_max_index] == 0) {
@@ -330,13 +321,11 @@ unsigned long minimize_distance(struct input_struct input, unsigned long* length
 
 
 // Process a set of inputs and print a regex that closely matches all of them
-int process(struct input_struct input, unsigned long* match_indices, unsigned long* tmp_match_indices, char* lost_chars, unsigned long* lengths) {
+int process(struct input_struct input) {
 
     unsigned long min_len = -1;
+    unsigned long* lengths = calloc(input.count, sizeof(unsigned long));
     for (int i = 0; i < input.count; i++) {
-        lengths[i] = 0;
-        match_indices[i] = 0;
-        tmp_match_indices[i] = 0;
         while (input.strings[i][lengths[i]]) {
             lengths[i]++;
         }
@@ -345,15 +334,19 @@ int process(struct input_struct input, unsigned long* match_indices, unsigned lo
         }
     }
 
-    unsigned long matched_len = longest_commong_substring(input, min_len, lengths, match_indices, tmp_match_indices);
-    //minimize_distance(input, lengths, match_indices, matched_len);
+    unsigned long* match_indices = malloc(sizeof(unsigned long) * (input.count));
+    unsigned long matched_len = longest_commong_substring(input, min_len, lengths, match_indices);
+    minimize_distance(input, lengths, match_indices, matched_len);
 
     if (matched_len == 0) {
         print_options(input, lengths);
+        free(lengths);
+        free(match_indices);
         return 0;
     }
 
     char nonempty = 0;
+    char* lost_chars = malloc(sizeof(char) * input.count);
     for (unsigned long i = 0; i < input.count; i++) {
         if (!nonempty && match_indices[i] > 0) {
             nonempty = 1;
@@ -362,7 +355,7 @@ int process(struct input_struct input, unsigned long* match_indices, unsigned lo
         input.strings[i][match_indices[i]] = '\0';
     }
     if (nonempty) {
-        process(input, match_indices, tmp_match_indices, lost_chars, lengths);
+        process(input);
     }
     for (unsigned long i = 0; i < input.count; i++) {
         input.strings[i][match_indices[i]] = lost_chars[i];
@@ -378,36 +371,16 @@ int process(struct input_struct input, unsigned long* match_indices, unsigned lo
         input.strings[i] += matched_len + match_indices[i];
     }
     if (nonempty) {
-        process(input, match_indices, tmp_match_indices, lost_chars, lengths);
+        process(input);
     }
     for (unsigned long i = 0; i < input.count; i++) {
         input.strings[i] -= matched_len + match_indices[i];
     }
 
+    free(lost_chars);
+    free(lengths);
+    free(match_indices);
     return 0;
-}
-
-int setup_process(struct input_struct input) {
-
-    void* malloc_buf = STATIC_ALLOC;
-
-    if (input.count * 4 > STATIC_ALLOC_SIZE) {
-        void* malloc_buf = malloc(sizeof(unsigned long) * (input.count) * 3 + sizeof(char) * input.count);
-    }
-
-    unsigned long* match_indices = (unsigned long*) malloc_buf;
-    unsigned long* tmp_match_indices = (unsigned long*) (malloc_buf + sizeof(unsigned long) * (input.count));
-    char* lost_chars =  (char*) (malloc_buf + sizeof(unsigned long) * (input.count) * 2);
-    unsigned long* lengths = (unsigned long*) (malloc_buf + sizeof(unsigned long) * (input.count) * 3);
-
-    int res = process(input, match_indices, tmp_match_indices, lost_chars, lengths);
-
-    if (input.count * 4 > STATIC_ALLOC_SIZE) {
-        free(malloc_buf);
-    }
-
-
-    return res;
 }
 
 
@@ -547,10 +520,10 @@ int main (int argc, char** argv) {
     }
     struct input_struct input = {input_count, inputs};
 
-    //for (int i = 0; i < 1000000; i++) {
-    //    setup_process(input);
+    //for (int i = 0; i < 10000; i++) {
+    //    process(input);
     //}
-    setup_process(input);
+    process(input);
 
     exit(EXIT_SUCCESS);
 }
