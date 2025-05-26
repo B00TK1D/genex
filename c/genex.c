@@ -14,9 +14,7 @@ struct input_struct {
 };
 
 struct processing_struct {
-  struct input_struct input;
-  unsigned long min_len;
-  unsigned long max_len;
+  struct input_struct* input;
 
   unsigned long* tmp_indices;   // [input.count]
   unsigned long** lcs_indices;  // [min_len][input.count]
@@ -30,7 +28,10 @@ struct processing_struct {
   unsigned long* tmp_match_indices;     // [max_len]
   unsigned long* current_match_indices; // [input.count]
 
-  char** lost_chars;  // [input.count][min_len]
+  unsigned long** starts;     // [min_len][input.count]
+  unsigned long** lengths;    // [min_len][input.count]
+  unsigned long* min_lengths; // [min_len]
+  unsigned long* max_lengths; // [min_len]
   unsigned long depth;
 };
 
@@ -39,7 +40,7 @@ char verystrict = 0;
 char quiet = 0;
 
 // Help message
-void print_help(char* bin_name) {
+void print_help(const char* bin_name) {
     printf("Usage: %s [-sSd:f:] [inputs...]\n", bin_name);
     printf("  -s: Strict mode - do not attempt to expand charsets based on statistical analysis and common charsets\n");
     printf("  -S: Very strict mode - do not merge variables from different inputs into combined charsets\n");
@@ -113,7 +114,7 @@ void print_escaped(char* s, unsigned long len) {
 }
 
 
-void print_number(unsigned long n) {
+void print_number(const unsigned long n) {
     if (n/10) {
         print_number(n/10);
     }
@@ -122,7 +123,7 @@ void print_number(unsigned long n) {
 
 
 // Print a regex range expression (i.e. {3,5}), given a min and max value
-void print_range(unsigned long min, unsigned long max) {
+void print_range(const unsigned long min, const unsigned long max) {
     if (min == 0) {
         if (max == 1) {
             putchar('?');
@@ -150,20 +151,20 @@ void print_range(unsigned long min, unsigned long max) {
 
 
 // Print a series of options that a variable might have (in regex-compatible format)
-void print_options(struct input_struct input, unsigned long* lengths) {
+void print_options(const struct input_struct* input, const unsigned long* lengths) {
     if (quiet) {
         return;
     }
-    if (!input.count) {
+    if (!input->count) {
         return;
     }
 
     if (verystrict) {
         putchar('(');
-        print_escaped(input.strings[0], lengths[0]);
-        for (unsigned long i = 1; i < input.count; i++) {
+        print_escaped(input->strings[0], lengths[0]);
+        for (unsigned long i = 1; i < input->count; i++) {
             putchar('|');
-            print_escaped(input.strings[i], lengths[i]);
+            print_escaped(input->strings[i], lengths[i]);
         }
         putchar(')');
         return;
@@ -174,9 +175,9 @@ void print_options(struct input_struct input, unsigned long* lengths) {
     unsigned long min_len = lengths[0];
     unsigned long max_len = lengths[0];
 
-    for (unsigned long i = 0; i < input.count; i++) {
+    for (unsigned long i = 0; i < input->count; i++) {
         for (unsigned long j = 0; j < lengths[i]; j++) {
-            chars_present[input.strings[i][j]] = 1;
+            chars_present[input->strings[i][j]] = 1;
         }
         sample_size += lengths[i];
         if (lengths[i] < min_len) {
@@ -216,40 +217,10 @@ void print_options(struct input_struct input, unsigned long* lengths) {
 }
 
 
-#define STATIC_ALLOC_SIZE 1048576
-
-void* static_alloc_buf[STATIC_ALLOC_SIZE];
-void* global_memory = static_alloc_buf;
-unsigned long global_size = 0;
-unsigned long global_used = 0;
-
-void stack_init(unsigned long size) {
-  if (size > STATIC_ALLOC_SIZE) {
-    global_memory = malloc(size);
-  }
-  global_size = size;
-  global_used = 0;
-}
-
-void* stack_alloc(unsigned long size) {
-  global_used += size;
-  return (void*) (global_memory + (global_used - size));
-  printf("Alloc to %lu\n", global_used);
-  fflush(stdout);
-}
-
-void stack_free(unsigned long size) {
-  global_used -= size;
-  printf("Free to %lu\n", global_used);
-  fflush(stdout);
-}
-
-
-
 // Find the longest common substrings among a series of input strings using a binary search for length
-unsigned long longest_common_substrings(struct processing_struct data) {
+unsigned long longest_common_substrings(struct processing_struct* data) {
     unsigned long lcs_len = 0;
-    unsigned long min_len = data.min_len;
+    unsigned long min_len = data->min_lengths[data->depth];
     unsigned long upper_bound = min_len;
     unsigned long lower_bound = 1;
     unsigned long tmp_lcs_len = min_len;
@@ -257,15 +228,15 @@ unsigned long longest_common_substrings(struct processing_struct data) {
 
     while (min_len) {
         // Binary search subset length
-        unsigned long subset_index = data.input.count - 1;
+        unsigned long subset_index = data->input->count - 1;
         tmp_lcs_len = (upper_bound + lower_bound) / 2;
         start_index_1 = 0;
-        data.lcs_count = 0;
-        while (start_index_1 <= data.input.lengths[0] - tmp_lcs_len) {
+        data->lcs_count = 0;
+        while (start_index_1 <= data->lengths[data->depth][0] - tmp_lcs_len) {
             // Don't duplicate lcs searches
             start_index_2 = 0;
-            for (unsigned long i = 0; i < data.lcs_count && start_index_2 == 0; i++) {
-                if (memcmp(data.input.strings[0] + start_index_1, data.input.strings[0] + data.lcs_options[i], tmp_lcs_len) == 0) {
+            for (unsigned long i = 0; i < data->lcs_count && start_index_2 == 0; i++) {
+                if (memcmp(data->input->strings[0] + data->starts[data->depth][0] + start_index_1, data->input->strings[0] + data->starts[data->depth][0] + data->lcs_options[i], tmp_lcs_len) == 0) {
                     start_index_2 = 1;
                 }
             }
@@ -273,9 +244,9 @@ unsigned long longest_common_substrings(struct processing_struct data) {
                 start_index_1++;
                 continue;
             }
-            subset_index = data.input.count - 1;
-            while (start_index_2 <= data.input.lengths[subset_index] - tmp_lcs_len && subset_index > 0) {
-                if (memcmp(data.input.strings[0] + start_index_1, data.input.strings[subset_index] + start_index_2, tmp_lcs_len) == 0) {
+            subset_index = data->input->count - 1;
+            while (start_index_2 <= data->lengths[data->depth][subset_index] - tmp_lcs_len && subset_index > 0) {
+                if (memcmp(data->input->strings[0] + data->starts[data->depth][0] + start_index_1, data->input->strings[subset_index] + data->starts[data->depth][subset_index] + start_index_2, tmp_lcs_len) == 0) {
                     subset_index--;
                     start_index_2 = 0;
                     continue;
@@ -283,7 +254,7 @@ unsigned long longest_common_substrings(struct processing_struct data) {
                 start_index_2++;
             }
             if (subset_index == 0) {
-                data.lcs_options[(data.lcs_count)++] = start_index_1;
+                data->lcs_options[(data->lcs_count)++] = start_index_1;
                 lcs_len = tmp_lcs_len;
             }
             start_index_1++;
@@ -298,29 +269,27 @@ unsigned long longest_common_substrings(struct processing_struct data) {
         }
     }
 
-    data.lcs_len = lcs_len;
+    data->lcs_len = lcs_len;
     return lcs_len;
 }
 
 
 // Minimize the distance between the substrings
-unsigned long minimize_distance(struct processing_struct data) {
+unsigned long minimize_distance(struct processing_struct* data) {
 
     unsigned long tmp_match_count = 0;
-    for (unsigned long i = 0; i < data.input.count; i++) {
+    for (unsigned long i = 0; i < data->input->count; i++) {
         // Find all occurances of the substring in the string
-        for (unsigned long j = 0; j <= data.input.lengths[i] - data.lcs_len; j++) {
-            if (memcmp(data.input.strings[i] + j, data.input.strings[0] + data.lcs_index, data.lcs_len) == 0) {
-                data.tmp_match_indices[tmp_match_count++] = j;
+        for (unsigned long j = 0; j <= data->input->lengths[i] - data->lcs_len; j++) {
+            if (memcmp(data->input->strings[0] + data->starts[data->depth][0] + data->lcs_index, data->input->strings[i] + data->starts[data->depth][i] + j, data->lcs_len) == 0) {
+                data->tmp_match_indices[tmp_match_count++] = j;
             }
         }
-        // Allocate the match_indices_list array
-        data.match_indices_list[i] = stack_alloc(sizeof(unsigned long) * tmp_match_count);
         // Copy the matches into the match_indices_list array
-        memcpy(data.match_indices_list[i], data.tmp_match_indices, sizeof(unsigned long) * tmp_match_count);
+        memcpy(data->match_indices_list[i], data->tmp_match_indices, sizeof(unsigned long) * tmp_match_count);
 
-        data.current_match_indices[i] = data.tmp_match_indices[tmp_match_count - 1];
-        data.match_counts[i] = tmp_match_count;
+        data->current_match_indices[i] = data->tmp_match_indices[tmp_match_count - 1];
+        data->match_counts[i] = tmp_match_count;
         tmp_match_count = 0;
     }
 
@@ -333,137 +302,131 @@ unsigned long minimize_distance(struct processing_struct data) {
         current_max = 0;
         current_max_index = 0;
 
-        for (unsigned long i = 0; i < data.input.count; i++) {
-            if (data.current_match_indices[i] < current_min) {
-                current_min = data.current_match_indices[i];
+        for (unsigned long i = 0; i < data->input->count; i++) {
+            if (data->current_match_indices[i] < current_min) {
+                current_min = data->current_match_indices[i];
             }
-            if (data.current_match_indices[i] > current_max) {
-                current_max = data.current_match_indices[i];
+            if (data->current_match_indices[i] > current_max) {
+                current_max = data->current_match_indices[i];
             }
-            if (data.current_match_indices[i] > data.current_match_indices[current_max_index]) {
+            if (data->current_match_indices[i] > data->current_match_indices[current_max_index]) {
                 current_max_index = i;
             }
         }
 
         if (current_max - current_min < min_distance) {
             min_distance = current_max - current_min;
-            memcpy(data.tmp_indices, data.current_match_indices, sizeof(unsigned long) * data.input.count);
+            memcpy(data->tmp_indices, data->current_match_indices, sizeof(unsigned long) * data->input->count);
         }
 
-        if (data.match_counts[current_max_index] == 0) {
+        if (data->match_counts[current_max_index] == 0) {
             return min_distance;
         }
 
-        data.current_match_indices[current_max_index] = data.match_indices_list[current_max_index][--data.match_counts[current_max_index]];
+        data->current_match_indices[current_max_index] = data->match_indices_list[current_max_index][--data->match_counts[current_max_index]];
     }
 
     return 0;
 }
 
-struct processing_struct pre_process(struct input_struct input) {
-    struct processing_struct data = {
-        .input = input,
-        .max_len = 0,
-        .min_len = -1,
-        .depth = 0,
-    };
 
-    for (int i = 0; i < input.count; i++) {
-        if (data.input.lengths[i] < data.min_len) {
-            data.min_len = data.input.lengths[i];
+void pre_process(struct input_struct* input, struct processing_struct* data) {
+    unsigned long min_len = ULONG_MAX;
+    unsigned long max_len = 0;
+    data->input = input;
+    data->depth = 0;
+
+    for (int i = 0; i < input->count; i++) {
+        if (data->input->lengths[i] < min_len) {
+            min_len = data->input->lengths[i];
         }
-        if (data.input.lengths[i] > data.max_len) {
-            data.max_len = data.input.lengths[i];
+        if (data->input->lengths[i] > max_len) {
+            max_len = data->input->lengths[i];
         }
     }
+    data->min_lengths[0] = min_len;
+    data->max_lengths[0] = max_len;
 
 
-    data.tmp_indices = malloc(sizeof(unsigned long) * input.count);
-    data.lcs_indices = malloc(sizeof(unsigned long*) * data.min_len);
-    data.lcs_options = malloc(sizeof(unsigned long) * input.count);
+    data->tmp_indices = malloc(sizeof(unsigned long) * input->count);
+    data->lcs_indices = malloc(sizeof(unsigned long*) * min_len);
+    data->lcs_options = malloc(sizeof(unsigned long) * input->count);
 
-    data.lost_chars = malloc(sizeof(char*) * input.count);
+    data->starts = malloc(sizeof(unsigned long*) * min_len);
+    data->lengths = malloc(sizeof(unsigned long*) * min_len);
+    data->min_lengths = malloc(sizeof(unsigned long) * min_len);
+    data->max_lengths = malloc(sizeof(unsigned long) * min_len);
 
-    data.match_indices_list = malloc(sizeof(unsigned long) * input.count);
-    data.match_counts = malloc(sizeof(unsigned long) * input.count);
-    data.tmp_match_indices = malloc(sizeof(unsigned long) * data.max_len);
-    data.current_match_indices = malloc(sizeof(unsigned long) * input.count);
+    data->match_indices_list = malloc(sizeof(unsigned long) * input->count);
+    data->match_counts = malloc(sizeof(unsigned long) * input->count);
+    data->tmp_match_indices = malloc(sizeof(unsigned long) * max_len);
+    data->current_match_indices = malloc(sizeof(unsigned long) * input->count);
 
-    for (int i = 0; i < data.min_len; i++) {
-        data.lcs_indices[i] = malloc(sizeof(unsigned long) * input.count);
+    for (int i = 0; i < min_len; i++) {
+        data->lcs_indices[i] = malloc(sizeof(unsigned long) * input->count);
+        data->starts[i] = malloc(sizeof(unsigned long) * input->count);
+        data->lengths[i] = malloc(sizeof(unsigned long) * input->count);
     }
 
-    for (int i = 0; i < input.count; i++) {
-        data.match_indices_list[i] = malloc(sizeof(unsigned long) * data.input.lengths[i]);
-        data.lost_chars[i] = malloc(sizeof(char) * data.min_len);
+    for (int i = 0; i < input->count; i++) {
+        data->match_indices_list[i] = malloc(sizeof(unsigned long) * data->input->lengths[i]);
     }
-
-    return data;
 }
 
 // Process a set of inputs and print a regex that closely matches all of them
-int process(struct processing_struct data) {
+int process(struct processing_struct* data) {
 
-    unsigned long min_len = -1;
-    unsigned long max_len = 0;
-    for (int i = 0; i < data.input.count; i++) {
-        if (data.input.lengths[i] < data.min_len) {
-            data.min_len = data.input.lengths[i];
-        }
-        if (data.input.lengths[i] > data.max_len) {
-            data.max_len = data.input.lengths[i];
-        }
-    }
+    printf("Processing depth %lu\n", data->depth);
+    fflush(stdout);
 
     longest_common_substrings(data);
 
     unsigned long min_distance = ULONG_MAX;
-    for (unsigned long i = 0; i < data.lcs_count; i++) {
+    for (unsigned long i = 0; i < data->lcs_count; i++) {
+        data->lcs_index = data->lcs_options[i];
         unsigned long temp_distance = minimize_distance(data);
         if (temp_distance < min_distance) {
             min_distance = temp_distance;
-            memcpy(data.lcs_indices[data.depth], data.tmp_indices, sizeof(unsigned long) * data.input.count);
+            memcpy(data->lcs_indices[data->depth], data->tmp_indices, sizeof(unsigned long) * data->input->count);
         }
     }
 
-    if (data.lcs_len == 0) {
-        print_options(data.input, data.input.lengths);
+
+    if (data->lcs_len == 0) {
+        print_options(data->input, data->input->lengths);
+        fflush(stdout);
         return 0;
     }
 
     char nonempty = 0;
-    for (unsigned long i = 0; i < data.input.count; i++) {
-        if (!nonempty && data.lcs_indices[i] > 0) {
+    for (unsigned long i = 0; i < data->input->count; i++) {
+        if (!nonempty && data->lcs_indices[data->depth][i] > 0) {
             nonempty = 1;
         }
-        data.lost_chars[data.depth][i] = data.input.strings[i][data.lcs_indices[data.depth][i]];
-        data.input.strings[i][data.lcs_indices[data.depth][i]] = '\0';
+        data->starts[data->depth+1][i] = 0;
+        data->lengths[data->depth+1][i] = data->lcs_indices[data->depth][i];
     }
     if (nonempty) {
-        data.depth++;
+        data->depth++;
         process(data);
-        data.depth--;
-    }
-    for (unsigned long i = 0; i < data.input.count; i++) {
-        data.input.strings[i][data.lcs_indices[data.depth][i]] = data.lost_chars[data.depth][i];
+        data->depth--;
     }
 
-    print_escaped(data.input.strings[0] + data.lcs_indices[data.depth][0], data.lcs_len);
+    print_escaped(data->input->strings[0] + data->starts[data->depth][0] + data->lcs_indices[data->depth][0], data->lcs_len);
+    fflush(stdout);
 
     nonempty = 0;
-    for (unsigned long i = 0; i < data.input.count; i++) {
-        if (!nonempty && data.lcs_indices[data.depth][i] + data.lcs_len < data.input.lengths[i]) {
+    for (unsigned long i = 0; i < data->input->count; i++) {
+        if (!nonempty && data->lcs_indices[data->depth][i] + data->lcs_len < data->lengths[data->depth][i]) {
             nonempty = 1;
         }
-        data.input.strings[i] += data.lcs_len + data.lcs_indices[data.depth][i];
+        data->starts[data->depth+1][i] = data->lcs_indices[data->depth][i] + data->lcs_len;
+        data->lengths[data->depth+1][i] = data->lengths[data->depth][i] - data->lcs_indices[data->depth][i] - data->lcs_len;
     }
     if (nonempty) {
-        data.depth++;
+        data->depth++;
         process(data);
-        data.depth--;
-    }
-    for (unsigned long i = 0; i < data.input.count; i++) {
-        data.input.strings[i] -= data.lcs_len + data.lcs_indices[data.depth][i];
+        data->depth--;
     }
 
     return 0;
@@ -622,13 +585,16 @@ int main (int argc, char** argv) {
         }
     }
 
-    for (int i = 0; i < 1000000; i++) {
-        process(input);
-    }
+    struct processing_struct data;
+    pre_process(&input, &data);
+
+    //for (int i = 0; i < 1000000; i++) {
+    //    process(data);
+    //}
+    process(&data);
     if (!quiet) {
         putchar('\n');
     }
-    printf("DEBUG: Allocated %lu bytes\n", global_used);
 
     exit(EXIT_SUCCESS);
 }
