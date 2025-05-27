@@ -39,6 +39,7 @@ void* STATIC_ALLOC[STATIC_ALLOC_SIZE];
 
 // Print a string to stdout, including regex special characters, escaping it if necessary.
 void print_escaped(char* s, unsigned long len) {
+    return;
     for (unsigned long i = 0; i < len; i++) {
         switch (s[i]) {
             case '\\':
@@ -137,6 +138,7 @@ void print_range(unsigned long min, unsigned long max) {
 
 // Print a series of options that a variable might have (in regex-compatible format)
 void print_options(struct input_struct input, unsigned long* lengths) {
+    return;
     if (!input.count) {
         return;
     }
@@ -346,7 +348,7 @@ int process(struct input_struct input, unsigned long* match_indices, unsigned lo
     }
 
     unsigned long matched_len = longest_commong_substring(input, min_len, lengths, match_indices, tmp_match_indices);
-    //minimize_distance(input, lengths, match_indices, matched_len);
+    minimize_distance(input, lengths, match_indices, matched_len);
 
     if (matched_len == 0) {
         print_options(input, lengths);
@@ -547,10 +549,10 @@ int main (int argc, char** argv) {
     }
     struct input_struct input = {input_count, inputs};
 
-    //for (int i = 0; i < 1000000; i++) {
-    //    setup_process(input);
-    //}
-    setup_process(input);
+    for (int i = 0; i < 1000000; i++) {
+        setup_process(input);
+    }
+    //setup_process(input);
 
     exit(EXIT_SUCCESS);
 }
