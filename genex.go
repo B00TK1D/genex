@@ -24,11 +24,6 @@ func Genex(inputs [][]byte) Protocol {
 		return result
 	}
 
-	// Initialize memory pool
-	var pool C.memory_pool
-	C.pool_init(&pool, 1024*1024) // 1MB initial size
-	defer C.pool_destroy(&pool)
-
 	// Allocate input_buffers
 	var input C.input_buffers
 	*(*C.uint)(unsafe.Pointer(&input.count)) = C.uint(inputCount)
@@ -57,6 +52,12 @@ func Genex(inputs [][]byte) Protocol {
 
 	input.min_len = minLen
 	input.max_len = maxLen
+
+	// Initialize memory pool
+	var pool C.memory_pool
+	initialPoolSize := C.ulong(inputCount) * maxLen * C.ulong(unsafe.Sizeof(C.ulong(0))) * 100
+	C.pool_init(&pool, initialPoolSize)
+	defer C.pool_destroy(&pool)
 
 	// Allocate output_buffers
 	var output C.output_buffers

@@ -4,22 +4,40 @@
 #include <stdlib.h>
 #include <string.h>
 
-// Memory pool structure - optimized for cache alignment
-typedef struct {
+// Memory chunk structure for linked list
+typedef struct memory_chunk {
   char *buffer;
   unsigned long size;
   unsigned long used;
+  struct memory_chunk *prev;
+} memory_chunk;
+
+// Memory pool structure using linked list of chunks
+typedef struct {
+  memory_chunk *current;
+  unsigned long initial_chunk_size;
 } memory_pool;
 
 // Initialize a memory pool
 static inline void pool_init(memory_pool *pool, unsigned long initial_size) {
-  pool->buffer = malloc(initial_size);
-  if (!pool->buffer) {
+  pool->initial_chunk_size = initial_size;
+
+  memory_chunk *chunk = malloc(sizeof(memory_chunk));
+  if (!chunk) {
+    fprintf(stderr, "Error: Failed to allocate memory chunk structure\n");
+    exit(EXIT_FAILURE);
+  }
+
+  chunk->buffer = malloc(initial_size);
+  if (!chunk->buffer) {
     fprintf(stderr, "Error: Failed to allocate memory pool\n");
     exit(EXIT_FAILURE);
   }
-  pool->size = initial_size;
-  pool->used = 0;
+
+  chunk->size = initial_size;
+  chunk->used = 0;
+  chunk->prev = NULL;
+  pool->current = chunk;
 }
 
 // Allocate from pool - inline for speed
@@ -27,43 +45,110 @@ static inline void *pool_alloc(memory_pool *pool, unsigned long size) {
   // Align to 8 bytes
   unsigned long aligned_size = (size + 7) & ~7UL;
 
-  if (__builtin_expect(pool->used + aligned_size > pool->size, 0)) {
-    // Need to grow the pool (cold path)
-    unsigned long new_size = pool->size * 2;
-    while (new_size < pool->used + aligned_size) {
-      new_size *= 2;
+  memory_chunk *current = pool->current;
+
+  if (__builtin_expect(current->used + aligned_size > current->size, 0)) {
+    // Need to allocate a new chunk
+    unsigned long new_chunk_size = current->size * 2;
+    while (new_chunk_size < aligned_size) {
+      new_chunk_size *= 2;
     }
 
-    char *new_buffer = realloc(pool->buffer, new_size);
-    if (!new_buffer) {
+    memory_chunk *new_chunk = malloc(sizeof(memory_chunk));
+    if (!new_chunk) {
+      fprintf(stderr, "Error: Failed to allocate memory chunk structure\n");
+      exit(EXIT_FAILURE);
+    }
+
+    new_chunk->buffer = malloc(new_chunk_size);
+    if (!new_chunk->buffer) {
       fprintf(stderr, "Error: Failed to grow memory pool\n");
       exit(EXIT_FAILURE);
     }
 
-    pool->buffer = new_buffer;
-    pool->size = new_size;
+    new_chunk->size = new_chunk_size;
+    new_chunk->used = 0;
+    new_chunk->prev = current;
+    pool->current = new_chunk;
+    current = new_chunk;
   }
 
-  void *ptr = pool->buffer + pool->used;
-  pool->used += aligned_size;
+  void *ptr = current->buffer + current->used;
+  current->used += aligned_size;
   return ptr;
 }
 
 // Free last allocation (stack-like) - inline for speed
+// Handles freeing across multiple chunks if necessary
 static inline void pool_free_last(memory_pool *pool, unsigned long size) {
   unsigned long aligned_size = (size + 7) & ~7UL;
-  pool->used -= aligned_size;
+  unsigned long remaining = aligned_size;
+
+  while (remaining > 0) {
+    memory_chunk *current = pool->current;
+
+    if (current->used >= remaining) {
+      // Can free the rest from this chunk
+      current->used -= remaining;
+      remaining = 0;
+
+      // If current chunk is now empty and there's a previous chunk, switch back
+      if (current->used == 0 && current->prev != NULL) {
+        memory_chunk *prev = current->prev;
+        free(current->buffer);
+        free(current);
+        pool->current = prev;
+      }
+    } else {
+      // Free everything from this chunk and move to previous chunk
+      remaining -= current->used;
+
+      if (current->prev == NULL) {
+        // We've reached the first chunk and still have more to free
+        // This indicates a bug in the calling code
+        fprintf(stderr, "Error: pool_free_last called with size larger than "
+                        "total allocations\n");
+        current->used = 0;
+        return;
+      }
+
+      memory_chunk *prev = current->prev;
+      free(current->buffer);
+      free(current);
+      pool->current = prev;
+    }
+  }
 }
 
 // Reset pool to beginning - inline for speed
-static inline void pool_reset(memory_pool *pool) { pool->used = 0; }
+static inline void pool_reset(memory_pool *pool) {
+  // Free all chunks except the first one, and reset the first one
+  memory_chunk *current = pool->current;
+
+  while (current->prev != NULL) {
+    memory_chunk *prev = current->prev;
+    free(current->buffer);
+    free(current);
+    current = prev;
+  }
+
+  current->used = 0;
+  pool->current = current;
+}
 
 // Destroy pool
 static inline void pool_destroy(memory_pool *pool) {
-  free(pool->buffer);
-  pool->buffer = NULL;
-  pool->size = 0;
-  pool->used = 0;
+  memory_chunk *current = pool->current;
+
+  // Free all chunks
+  while (current != NULL) {
+    memory_chunk *prev = current->prev;
+    free(current->buffer);
+    free(current);
+    current = prev;
+  }
+
+  pool->current = NULL;
 }
 
 // Optimized bytes struct
@@ -261,16 +346,20 @@ static inline int fast_memcmp(const char *s1, const char *s2, unsigned long n) {
 }
 
 // Simple string search with first-character heuristic
-static inline unsigned long simple_search(const char *haystack, unsigned long haystack_len,
-                                          const char *needle, unsigned long needle_len) {
-  if (needle_len > haystack_len) return haystack_len + 1;
+static inline unsigned long simple_search(const char *haystack,
+                                          unsigned long haystack_len,
+                                          const char *needle,
+                                          unsigned long needle_len) {
+  if (needle_len > haystack_len)
+    return haystack_len + 1;
 
   unsigned long max_pos = haystack_len - needle_len;
   char first = needle[0];
 
   for (unsigned long pos = 0; pos <= max_pos; pos++) {
     if (haystack[pos] == first) {
-      if (needle_len == 1 || fast_memcmp(needle + 1, haystack + pos + 1, needle_len - 1) == 0) {
+      if (needle_len == 1 ||
+          fast_memcmp(needle + 1, haystack + pos + 1, needle_len - 1) == 0) {
         return pos;
       }
     }
@@ -280,9 +369,12 @@ static inline unsigned long simple_search(const char *haystack, unsigned long ha
 }
 
 // Boyer-Moore-Horspool string search for longer patterns
-static inline unsigned long bmh_search(const char *haystack, unsigned long haystack_len,
-                                       const char *needle, unsigned long needle_len) {
-  if (needle_len > haystack_len) return haystack_len + 1;
+static inline unsigned long bmh_search(const char *haystack,
+                                       unsigned long haystack_len,
+                                       const char *needle,
+                                       unsigned long needle_len) {
+  if (needle_len > haystack_len)
+    return haystack_len + 1;
 
   // For very short needles, simple search is faster
   if (needle_len <= 3) {
@@ -345,8 +437,9 @@ static unsigned long longest_commong_substring(input_buffers input,
     int found = 0;
 
     // Adaptive stride: larger for longer patterns
-    unsigned long stride = (subset_len > 32) ? (subset_len / 2) :
-                          (subset_len > 16) ? (subset_len / 4) : 1;
+    unsigned long stride = (subset_len > 32)   ? (subset_len / 2)
+                           : (subset_len > 16) ? (subset_len / 4)
+                                               : 1;
 
     // Outer loop over first string
     for (unsigned long start_index_1 = 0; start_index_1 <= max_start;
@@ -389,13 +482,18 @@ static unsigned long longest_commong_substring(input_buffers input,
 
     // If stride search didn't find anything, do fine-grained search
     if (!found && stride > 1) {
-      unsigned long search_start = (matched_len > 0) ?
-        (match_indices[0] > stride ? match_indices[0] - stride : 0) : 0;
-      unsigned long search_end = (matched_len > 0) ?
-        (match_indices[0] + stride < max_start ? match_indices[0] + stride : max_start) : max_start;
+      unsigned long search_start =
+          (matched_len > 0)
+              ? (match_indices[0] > stride ? match_indices[0] - stride : 0)
+              : 0;
+      unsigned long search_end = (matched_len > 0)
+                                     ? (match_indices[0] + stride < max_start
+                                            ? match_indices[0] + stride
+                                            : max_start)
+                                     : max_start;
 
-      for (unsigned long start_index_1 = search_start; start_index_1 <= search_end;
-           start_index_1++) {
+      for (unsigned long start_index_1 = search_start;
+           start_index_1 <= search_end; start_index_1++) {
         const char *needle = input_contents_0 + start_index_1;
         unsigned int subset_index = input_count - 1;
 
@@ -464,7 +562,8 @@ static void minimize_distance(input_buffers *input,
 
   // Pre-allocate space for all match lists
   unsigned long total_matches = 0;
-  unsigned long match_offsets[input_count];
+  unsigned long *match_offsets =
+      pool_alloc(pool, sizeof(unsigned long) * input_count);
 
   // First pass: count matches using optimized search with first-char heuristic
   char first_char = pattern[0];
@@ -498,6 +597,7 @@ static void minimize_distance(input_buffers *input,
     pool_free_last(pool, sizeof(unsigned long) * input_count); // best
     pool_free_last(pool, sizeof(unsigned long) * input_count); // current
     pool_free_last(pool, sizeof(unsigned long) * input_count); // counts
+    pool_free_last(pool, sizeof(unsigned long) * input_count); // offsets
     return;
   }
 
@@ -571,6 +671,7 @@ static void minimize_distance(input_buffers *input,
   pool_free_last(pool, sizeof(unsigned long) * input_count); // best
   pool_free_last(pool, sizeof(unsigned long) * input_count); // current
   pool_free_last(pool, sizeof(unsigned long) * input_count); // counts
+  pool_free_last(pool, sizeof(unsigned long) * input_count); // offsets
 }
 
 // Process function - optimized with better memory management
