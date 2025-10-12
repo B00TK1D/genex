@@ -1,155 +1,99 @@
-package main
+package genex
 
-import "fmt"
+/*
+#include "genex.c"
+*/
+import "C"
+import (
+	"unsafe"
+)
 
-const MaxUint = ^uint(0)
-const MaxInt = int(MaxUint >> 1)
-
-type genexInput struct {
-	count   int
-	strings [][]byte
+type Field struct {
+	Constant  []byte
+	Variables [][]byte
 }
 
-type genexField struct {
-	key    []byte
-	values [][]byte
+type Protocol struct {
+	Field []Field
 }
 
-type genexOutput struct {
-	fields []genexField
-}
-
-func print_options(input genexInput, lengths []int) {
-	// Print the options
-	fmt.Print("(")
-	for i := 0; i < input.count; i++ {
-		fmt.Print(string(input.strings[i]))
-		if i < input.count-1 {
-			fmt.Print("|")
-		}
-	}
-	fmt.Print(")")
-
-	// Check if the key already exists
-	// if len((*output).fields) == 0 {
-	// 	(*output).fields = append((*output).fields, genexField{key: []byte{}, values: make([][]byte, 0)})
-	// }
-	// // Save to output
-	// for i := 0; i < input.count; i++ {
-	// 	(*output).fields[len((*output).fields)-1].values[i] = []byte(input.strings[i][:lengths[i]])
-	// }
-}
-
-func print_escaped(str []byte, len int) {
-	for i := 0; i < len; i++ {
-		fmt.Print(string(str[i]))
+func Genex(inputs [][]byte) Protocol {
+	inputCount := len(inputs)
+	result := Protocol{}
+	if inputCount == 0 {
+		return result
 	}
 
-	// Create a new key
-	//field := genexField{key: []byte{}, values: make([][]byte, 0)}
-}
+	// Initialize memory pool
+	var pool C.memory_pool
+	C.pool_init(&pool, 1024*1024) // 1MB initial size
+	defer C.pool_destroy(&pool)
 
-func longest_common_substring(input genexInput, min_len int, lengths []int, match_indices *[]int) int {
-	tmp_match_indices := make([]int, input.count)
-	matched_len := 0
-	upper_bound := min_len
-	lower_bound := 1
-	subset_len := min_len
-	start_index_1 := 0
-	start_index_2 := 0
+	// Allocate input_buffers
+	var input C.input_buffers
+	*(*C.uint)(unsafe.Pointer(&input.count)) = C.uint(inputCount)
+	input.values = (*C.bytes)(C.malloc(C.size_t(inputCount) * C.size_t(unsafe.Sizeof(C.bytes{}))))
+	defer C.free(unsafe.Pointer(input.values))
 
-	for min_len > 0 {
-		subset_index := input.count - 1
-		subset_len = (upper_bound + lower_bound) / 2
-		start_index_1 = 0
-		for start_index_1 <= lengths[0]-subset_len {
-			start_index_2 = 0
-			subset_index = input.count - 1
-			for start_index_2 <= lengths[subset_index]-subset_len && subset_index > 0 {
-				equal := true
-				for check_index := 0; check_index < subset_len; check_index++ {
-					if input.strings[0][start_index_1+check_index] != input.strings[subset_index][start_index_2+check_index] {
-						equal = false
-						break
-					}
-				}
-				if equal {
-					tmp_match_indices[subset_index] = start_index_2
-					subset_index--
-					start_index_2 = 0
-					continue
-				}
-				start_index_2++
-			}
-			if subset_index == 0 {
-				copy(*match_indices, tmp_match_indices)
-				(*match_indices)[0] = start_index_1
-				matched_len = subset_len
-				break
-			}
-			start_index_1++
-		}
-		if subset_index == 0 {
-			lower_bound = subset_len + 1
-		} else {
-			upper_bound = subset_len - 1
-		}
-		if lower_bound > upper_bound {
-			break
-		}
-	}
-	return matched_len
-}
+	// Convert Go strings to C bytes
+	var minLen, maxLen C.ulong = ^C.ulong(0), 0
+	valuesSlice := (*[1 << 30]C.bytes)(unsafe.Pointer(input.values))[:inputCount:inputCount]
+	cStrings := make([]*C.char, inputCount)
 
-func process(input genexInput) int {
-	min_len := MaxInt
-	lengths := make([]int, input.count)
-	for i := 0; i < input.count; i++ {
-		lengths[i] = len(input.strings[i])
-		if lengths[i] < min_len {
-			min_len = lengths[i]
+	for i, str := range inputs {
+		cStrings[i] = C.CString(string(str))
+		defer C.free(unsafe.Pointer(cStrings[i]))
+
+		valuesSlice[i].len = C.ulong(len(str))
+		valuesSlice[i].contents = cStrings[i]
+
+		if valuesSlice[i].len < minLen {
+			minLen = valuesSlice[i].len
+		}
+		if valuesSlice[i].len > maxLen {
+			maxLen = valuesSlice[i].len
 		}
 	}
 
-	match_indices := make([]int, input.count)
-	matched_len := longest_common_substring(input, min_len, lengths, &match_indices)
+	input.min_len = minLen
+	input.max_len = maxLen
 
-	if matched_len < 1 {
-		print_options(input, lengths)
-		return 0
+	// Allocate output_buffers
+	var output C.output_buffers
+	*(*C.uint)(unsafe.Pointer(&output.input_count)) = C.uint(inputCount)
+	output.const_count = 0
+
+	// Allocate space for constants (max possible: sum of all input lengths)
+	maxConstants := inputCount * 100 // Reasonable upper bound
+	output.constants = (*C.bytes)(C.malloc(C.size_t(maxConstants) * C.size_t(unsafe.Sizeof(C.bytes{}))))
+	defer C.free(unsafe.Pointer(output.constants))
+
+	// Allocate space for variables (2D array)
+	output.variables = (**C.bytes)(C.malloc(C.size_t(maxConstants) * C.size_t(unsafe.Sizeof(uintptr(0)))))
+	defer C.free(unsafe.Pointer(output.variables))
+
+	varsSlice := (*[1 << 30]*C.bytes)(unsafe.Pointer(output.variables))[:maxConstants:maxConstants]
+	for i := 0; i < maxConstants; i++ {
+		varsSlice[i] = (*C.bytes)(C.malloc(C.size_t(inputCount) * C.size_t(unsafe.Sizeof(C.bytes{}))))
+		defer C.free(unsafe.Pointer(varsSlice[i]))
 	}
 
-	nonempty := false
-	recurseInput := genexInput{count: input.count, strings: make([][]byte, input.count)}
-	for i := 0; i < input.count; i++ {
-		if !nonempty && match_indices[i] > 0 {
-			nonempty = true
+	// Call process
+	C.process(&input, &output, &pool)
+
+	// Generate Go structures from C output
+	constantsSlice := (*[1 << 30]C.bytes)(unsafe.Pointer(output.constants))[:output.const_count:output.const_count]
+	for i := 0; i < int(output.const_count); i++ {
+		field := Field{}
+		field.Constant = C.GoBytes(unsafe.Pointer(constantsSlice[i].contents), C.int(constantsSlice[i].len))
+
+		varsForField := (*[1 << 30]C.bytes)(unsafe.Pointer(varsSlice[i]))[:inputCount:inputCount]
+		for j := 0; j < inputCount; j++ {
+			varBytes := C.GoBytes(unsafe.Pointer(varsForField[j].contents), C.int(varsForField[j].len))
+			field.Variables = append(field.Variables, varBytes)
 		}
-		recurseInput.strings[i] = input.strings[i][:match_indices[i]]
-	}
-	if nonempty {
-		process(recurseInput)
-	}
 
-	print_escaped(input.strings[0][match_indices[0]:], matched_len)
-
-	nonempty = false
-	for i := 0; i < input.count; i++ {
-		if !nonempty && match_indices[i]+matched_len < lengths[i] {
-			nonempty = true
-		}
-		recurseInput.strings[i] = input.strings[i][match_indices[i]+matched_len:]
+		result.Field = append(result.Field, field)
 	}
-	if nonempty {
-		process(recurseInput)
-	}
-
-	return 0
-}
-
-func main() {
-	input1 := []byte("{'name': 'Sam Smith', 'age': 30, 'car': 'Chevy'}")
-	input2 := []byte("{'name': 'John Rogers', 'age': 25, 'car': 'Ford'}")
-	input := genexInput{count: 2, strings: [][]byte{input1, input2}}
-	process(input)
+	return result
 }

@@ -1,437 +1,654 @@
+#include <limits.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-#include <dirent.h>
 
-// Define a struct to hold the input_count and inputs array
-// (Helps with limiting function parameters to 4 or under, to avoid the overhead of passing arguments via the stack)
-struct input_struct {
-    unsigned long count;
-    char** strings;
-};
+// Memory pool structure - optimized for cache alignment
+typedef struct {
+  char *buffer;
+  unsigned long size;
+  unsigned long used;
+} memory_pool;
 
-char strict = 0;
-char verystrict = 0;
-
-// Help message
-void print_help(char* bin_name) {
-    printf("Usage: %s [-sSd:f:] [inputs...]\n", bin_name);
-    printf("  -s: Strict mode - do not attempt to expand charsets based on statistical analysis and common charsets\n");
-    printf("  -S: Very strict mode - do not merge variables from different inputs into combined charsets\n");
-    printf("  -d <directory>: Read inputs from a directory (every file in directory is read as its own input)\n");
-    printf("  -f <file>: Read inputs from a file (every line in file is read as its own input)\n\n");
+// Initialize a memory pool
+static inline void pool_init(memory_pool *pool, unsigned long initial_size) {
+  pool->buffer = malloc(initial_size);
+  if (!pool->buffer) {
+    fprintf(stderr, "Error: Failed to allocate memory pool\n");
+    exit(EXIT_FAILURE);
+  }
+  pool->size = initial_size;
+  pool->used = 0;
 }
 
+// Allocate from pool - inline for speed
+static inline void *pool_alloc(memory_pool *pool, unsigned long size) {
+  // Align to 8 bytes
+  unsigned long aligned_size = (size + 7) & ~7UL;
 
-// Print a string to stdout, including regex special characters, escaping it if necessary.
-void print_escaped(char* s, unsigned long len) {
-    for (unsigned long i = 0; i < len; i++) {
-        switch (s[i]) {
-            case '\\':
-            case '/':
-            case '.':
-            case '*':
-            case '+':
-            case '?':
-            case '|':
-            case '(':
-            case ')':
-            case '[':
-            case ']':
-            case '{':
-            case '}':
-            case '^':
-            case '$':
-                putchar('\\');
-                putchar(s[i]);
-                break;
-            case '\n':
-                putchar('\\');
-                putchar('n');
-                break;
-            case '\t':
-                putchar('\\');
-                putchar('t');
-                break;
-            case '\r':
-                putchar('\\');
-                putchar('r');
-                break;
-            case '\f':
-                putchar('\\');
-                putchar('f');
-                break;
-            case '\v':
-                putchar('\\');
-                putchar('v');
-                break;
-            case '\a':
-                putchar('\\');
-                putchar('a');
-                break;
-            case '\b':
-                putchar('\\');
-                putchar('b');
-                break;
-            case '\0':
-                putchar('\\');
-                putchar('0');
-                break;
-            default:
-                putchar(s[i]);
-                break;
-        }
+  if (__builtin_expect(pool->used + aligned_size > pool->size, 0)) {
+    // Need to grow the pool (cold path)
+    unsigned long new_size = pool->size * 2;
+    while (new_size < pool->used + aligned_size) {
+      new_size *= 2;
     }
+
+    char *new_buffer = realloc(pool->buffer, new_size);
+    if (!new_buffer) {
+      fprintf(stderr, "Error: Failed to grow memory pool\n");
+      exit(EXIT_FAILURE);
+    }
+
+    pool->buffer = new_buffer;
+    pool->size = new_size;
+  }
+
+  void *ptr = pool->buffer + pool->used;
+  pool->used += aligned_size;
+  return ptr;
 }
 
-
-void print_number(unsigned long n) {
-    if (n/10) {
-        print_number(n/10);
-    }
-    putchar('0' + (n%10));
+// Free last allocation (stack-like) - inline for speed
+static inline void pool_free_last(memory_pool *pool, unsigned long size) {
+  unsigned long aligned_size = (size + 7) & ~7UL;
+  pool->used -= aligned_size;
 }
 
+// Reset pool to beginning - inline for speed
+static inline void pool_reset(memory_pool *pool) { pool->used = 0; }
 
-// Print a regex range expression (i.e. {3,5}), given a min and max value
-void print_range(unsigned long min, unsigned long max) {
-    if (min == 0) {
-        if (max == 1) {
-            putchar('?');
-            return;
-        }
-        putchar('{');
-        putchar('0');
-        putchar(',');
-        print_number(max);
-        putchar('}');
-        return;
-    }
-    if (min == max) {
-        putchar('{');
-        print_number(min);
-        putchar('}');
-        return;
-    }
-    putchar('{');
-    print_number(min);
-    putchar(',');
-    print_number(max);
-    putchar('}');
+// Destroy pool
+static inline void pool_destroy(memory_pool *pool) {
+  free(pool->buffer);
+  pool->buffer = NULL;
+  pool->size = 0;
+  pool->used = 0;
 }
 
+// Optimized bytes struct
+typedef struct {
+  unsigned long len;
+  char *contents;
+} bytes;
 
-// Print a series of options that a variable might have (in regex-compatible format)
-void print_options(struct input_struct input, unsigned long* lengths) {
-    if (!input.count) {
-        return;
-    }
+typedef struct {
+  const unsigned int count;
+  unsigned long min_len;
+  unsigned long max_len;
+  bytes *values;
+} input_buffers;
 
-    if (verystrict) {
-        putchar('(');
-        print_escaped(input.strings[0], lengths[0]);
-        for (unsigned long i = 1; i < input.count; i++) {
-            putchar('|');
-            print_escaped(input.strings[i], lengths[i]);
-        }
-        putchar(')');
-        return;
-    }
+typedef struct {
+  const unsigned int input_count;
+  unsigned long const_count;
+  bytes *constants;
+  bytes **variables;
+} output_buffers;
 
-    char chars_present[256] = {0};
-    unsigned long long sample_size = 0;
-    unsigned long min_len = lengths[0];
-    unsigned long max_len = lengths[0];
+// Print bytes - optimized to avoid temporary allocation for small strings
+static void print_bytes(bytes b) {
+  if (b.contents == NULL) {
+    return;
+  }
 
-    for (unsigned long i = 0; i < input.count; i++) {
-        for (unsigned long j = 0; j < lengths[i]; j++) {
-            chars_present[input.strings[i][j]] = 1;
-        }
-        sample_size += lengths[i];
-        if (lengths[i] < min_len) {
-            min_len = lengths[i];
-        }
-        if (lengths[i] > max_len) {
-            max_len = lengths[i];
-        }
-    }
-
-    putchar('(');
-    putchar('[');
-    unsigned char i = 0;
-    char in_range = 0;
-    while(1) {
-        if (in_range) {
-            if (!chars_present[i]) {
-                putchar('-');
-                i--;
-                print_escaped((char*) &i, 1);
-                i++;
-                in_range = 0;
-            }
-        } else if (chars_present[i]) {
-            print_escaped((char*)&i, 1);
-            in_range = 1;
-        }
-        if (++i == 0) {
-            break;
-        }
-    }
-    putchar(']');
-    print_range(min_len, max_len);
-    putchar(')');
+  // For small strings, use stack buffer
+  if (b.len < 4096) {
+    char tmpContents[4096];
+    memcpy(tmpContents, b.contents, b.len);
+    tmpContents[b.len] = 0;
+    fprintf(stderr, "%s", tmpContents);
+  } else {
+    // For large strings, allocate temporarily
+    memory_pool tmp_pool;
+    pool_init(&tmp_pool, b.len + 1);
+    char *tmpContents = pool_alloc(&tmp_pool, b.len + 1);
+    memcpy(tmpContents, b.contents, b.len);
+    tmpContents[b.len] = 0;
+    fprintf(stderr, "%s", tmpContents);
+    pool_destroy(&tmp_pool);
+  }
 }
 
+static void print_output(output_buffers *output) {
+  const unsigned int input_count = output->input_count;
+  const unsigned int const_count = output->const_count;
 
-// Find the longest common substring among a series of input strings using a binary search for length
-unsigned long longest_commong_substring(struct input_struct input, int min_len, unsigned long* lengths, unsigned long* match_indices) {
-    unsigned long* tmp_match_indices = malloc(sizeof(unsigned long) * (input.count));
-    unsigned long matched_len = 0;
-    unsigned long upper_bound = min_len;
-    unsigned long lower_bound = 1;
-    unsigned long subset_len = min_len;
-    unsigned long start_index_1, start_index_2;
-
-    while (min_len) {
-        unsigned long subset_index = input.count - 1;
-        subset_len = (upper_bound + lower_bound) / 2;
-        start_index_1 = 0;
-        while (start_index_1 <= lengths[0] - subset_len) {
-            start_index_2 = 0;
-            subset_index = input.count - 1;
-            while (start_index_2 <= lengths[subset_index] - subset_len && subset_index > 0) {
-                if (memcmp(input.strings[0] + start_index_1, input.strings[subset_index] + start_index_2, subset_len) == 0) {
-                    tmp_match_indices[subset_index] = start_index_2;
-                    subset_index--;
-                    start_index_2 = 0;
-                    continue;
-                }
-                start_index_2++;
-            }
-            if (subset_index == 0) {
-                memcpy(match_indices, tmp_match_indices, sizeof(unsigned long) * input.count);
-                match_indices[0] = start_index_1;
-                matched_len = subset_len;
-                break;
-            }
-            start_index_1++;
-        }
-        if (subset_index == 0) {
-            lower_bound = subset_len + 1;
-        } else {
-            upper_bound = subset_len - 1;
-        }
-        if (lower_bound > upper_bound) {
-            break;
-        }
+  for (unsigned long const_i = 0; const_i < const_count; const_i++) {
+    fprintf(stderr, "(");
+    for (unsigned int input_i = 0; input_i < input_count; input_i++) {
+      if (input_i > 0) {
+        fprintf(stderr, "|");
+      }
+      print_bytes(output->variables[const_i][input_i]);
     }
-    free(tmp_match_indices);
-
-    return matched_len;
+    fprintf(stderr, ")");
+    print_bytes(output->constants[const_i]);
+  }
+  fprintf(stderr, "\n");
 }
 
+static void print_input(input_buffers *input) {
+  const unsigned int input_count = input->count;
+  const bytes *values = input->values;
 
-// Process a set of inputs and print a regex that closely matches all of them
-int process(struct input_struct input) {
+  for (int i = 0; i < input_count; i++) {
+    fprintf(stderr, "%d: ", i);
+    print_bytes(values[i]);
+    fprintf(stderr, "\n");
+  }
+  fprintf(stderr, "\n");
+}
 
-    unsigned long min_len = -1;
-    unsigned long* lengths = calloc(input.count, sizeof(unsigned long));
-    for (int i = 0; i < input.count; i++) {
-        while (input.strings[i][lengths[i]]) {
-            lengths[i]++;
-        }
-        if (lengths[i] < min_len) {
-            min_len = lengths[i];
-        }
-    }
+static inline void add_variables(input_buffers *input, output_buffers *output) {
+  const unsigned int input_count = input->count;
+  const unsigned long const_count = output->const_count;
+  const bytes *input_values = input->values;
+  bytes **output_values = output->variables;
 
-    unsigned long* match_indices = malloc(sizeof(unsigned long) * (input.count));
-    unsigned long matched_len = longest_commong_substring(input, min_len, lengths, match_indices);
+  // Check if all inputs are empty - if so, don't add anything
+  char all_empty = 1;
+  for (unsigned int input_i = 0; input_i < input_count; input_i++) {
+    if (input_values[input_i].len > 0) {
+      all_empty = 0;
+      break;
+    }
+  }
 
-    if (matched_len == 0) {
-        print_options(input, lengths);
-        free(lengths);
-        free(match_indices);
-        return 0;
-    }
+  if (all_empty) {
+    return;
+  }
 
-    char nonempty = 0;
-    char* lost_chars = malloc(sizeof(char) * input.count);
-    for (unsigned long i = 0; i < input.count; i++) {
-        if (!nonempty && match_indices[i] > 0) {
-            nonempty = 1;
-        }
-        lost_chars[i] = input.strings[i][match_indices[i]];
-        input.strings[i][match_indices[i]] = '\0';
-    }
-    if (nonempty) {
-        process(input);
-    }
-    for (unsigned long i = 0; i < input.count; i++) {
-        input.strings[i][match_indices[i]] = lost_chars[i];
-    }
+  // Add variables
+  bytes *out = output_values[const_count];
+  for (unsigned int input_i = 0; input_i < input_count; input_i++) {
+    out[input_i].len = input_values[input_i].len;
+    out[input_i].contents = input_values[input_i].contents;
+  }
 
-    print_escaped(input.strings[0] + match_indices[0], matched_len);
+  // Set empty constant
+  bytes *con = &output->constants[const_count];
+  con->len = 0;
+  con->contents = NULL;
 
-    nonempty = 0;
-    for (unsigned long i = 0; i < input.count; i++) {
-        if (!nonempty && match_indices[i] + matched_len < lengths[i]) {
-            nonempty = 1;
-        }
-        input.strings[i] += matched_len + match_indices[i];
-    }
-    if (nonempty) {
-        process(input);
-    }
-    for (unsigned long i = 0; i < input.count; i++) {
-        input.strings[i] -= matched_len + match_indices[i];
-    }
+  // Increment count
+  output->const_count++;
+}
 
-    free(lost_chars);
-    free(lengths);
-    free(match_indices);
+static inline void add_constant(input_buffers *input, output_buffers *output,
+                                unsigned long match_index,
+                                unsigned long matched_len) {
+
+  bytes **output_values = output->variables;
+  const unsigned int input_count = input->count;
+
+  // Check if the previous field has empty constant and we should update it
+  if (output->const_count > 0) {
+    bytes *prev_con = &output->constants[output->const_count - 1];
+    if (prev_con->len == 0 && prev_con->contents == NULL) {
+      // Previous field has empty constant, update it
+      prev_con->len = matched_len;
+      prev_con->contents = input->values[0].contents + match_index;
+      return;
+    }
+  }
+
+  // Otherwise, create a new field with empty variables
+  bytes *vars = output_values[output->const_count];
+  for (unsigned int i = 0; i < input_count; i++) {
+    vars[i].len = 0;
+    vars[i].contents = NULL;
+  }
+
+  bytes *con = &output->constants[output->const_count];
+  con->len = matched_len;
+  con->contents = input->values[0].contents + match_index;
+  output->const_count++;
+}
+
+// Optimized memcmp that uses native word size comparisons
+static inline int fast_memcmp(const char *s1, const char *s2, unsigned long n) {
+  if (n <= 4) {
+    for (unsigned long i = 0; i < n; i++) {
+      if (s1[i] != s2[i])
+        return 1;
+    }
     return 0;
+  }
+
+  if (n == 8) {
+    // Use 64-bit comparison for exactly 8 bytes
+    uint64_t v1, v2;
+    memcpy(&v1, s1, 8);
+    memcpy(&v2, s2, 8);
+    return v1 != v2;
+  }
+
+  if (n < 8) {
+    // For 5-7 bytes, compare byte by byte to avoid reading beyond bounds
+    for (unsigned long i = 0; i < n; i++) {
+      if (s1[i] != s2[i])
+        return 1;
+    }
+    return 0;
+  }
+
+  if (n <= 16) {
+    // Use two 64-bit comparisons with overlap
+    uint64_t v1a, v2a, v1b, v2b;
+    memcpy(&v1a, s1, 8);
+    memcpy(&v2a, s2, 8);
+    memcpy(&v1b, s1 + n - 8, 8);
+    memcpy(&v2b, s2 + n - 8, 8);
+    return (v1a != v2a) || (v1b != v2b);
+  }
+
+  if (n <= 32) {
+    // Use four 64-bit comparisons with overlap for 17-32 bytes
+    uint64_t v1a, v2a, v1b, v2b, v1c, v2c, v1d, v2d;
+    memcpy(&v1a, s1, 8);
+    memcpy(&v2a, s2, 8);
+    memcpy(&v1b, s1 + 8, 8);
+    memcpy(&v2b, s2 + 8, 8);
+    memcpy(&v1c, s1 + n - 16, 8);
+    memcpy(&v2c, s2 + n - 16, 8);
+    memcpy(&v1d, s1 + n - 8, 8);
+    memcpy(&v2d, s2 + n - 8, 8);
+    return (v1a != v2a) || (v1b != v2b) || (v1c != v2c) || (v1d != v2d);
+  }
+
+  return memcmp(s1, s2, n);
 }
 
+// Simple string search with first-character heuristic
+static inline unsigned long simple_search(const char *haystack, unsigned long haystack_len,
+                                          const char *needle, unsigned long needle_len) {
+  if (needle_len > haystack_len) return haystack_len + 1;
 
-int main (int argc, char** argv) {
+  unsigned long max_pos = haystack_len - needle_len;
+  char first = needle[0];
 
-    int opt;
-    int arg_count = 1;
-    char source_type = 0;
-    char* source = NULL;
-    while ((opt = getopt(argc, argv, "hsSd:f:")) != -1) {
-        switch (opt) {
-        case 'h':
-        case '?':
-            print_help(argv[0]);
-            exit(EXIT_SUCCESS);
-        case 's':
-            arg_count++;
-            strict = 1;
-            break;
-        case 'S':
-            arg_count++;
-            verystrict = 1;
-            break;
-        case 'd':
-            arg_count += 2;
-            if (source_type) {
-                fprintf(stderr, "Error: Only one source can be specified\n");
-                exit(EXIT_FAILURE);
-            }
-            source_type = 1;
-            source = optarg;
-            break;
-        case 'f':
-            arg_count += 2;
-            if (source_type) {
-                fprintf(stderr, "Error: Only one source can be specified\n");
-                exit(EXIT_FAILURE);
-            }
-            source_type = 2;
-            source = optarg;
-            break;
-        default:
-            print_help(argv[0]);
-            exit(EXIT_FAILURE);
+  for (unsigned long pos = 0; pos <= max_pos; pos++) {
+    if (haystack[pos] == first) {
+      if (needle_len == 1 || fast_memcmp(needle + 1, haystack + pos + 1, needle_len - 1) == 0) {
+        return pos;
+      }
+    }
+  }
+
+  return haystack_len + 1;
+}
+
+// Boyer-Moore-Horspool string search for longer patterns
+static inline unsigned long bmh_search(const char *haystack, unsigned long haystack_len,
+                                       const char *needle, unsigned long needle_len) {
+  if (needle_len > haystack_len) return haystack_len + 1;
+
+  // For very short needles, simple search is faster
+  if (needle_len <= 3) {
+    return simple_search(haystack, haystack_len, needle, needle_len);
+  }
+
+  // Build bad character table
+  unsigned long bad_char[256];
+  for (int i = 0; i < 256; i++) {
+    bad_char[i] = needle_len;
+  }
+  for (unsigned long i = 0; i < needle_len - 1; i++) {
+    bad_char[(unsigned char)needle[i]] = needle_len - 1 - i;
+  }
+
+  unsigned long pos = 0;
+  unsigned long max_pos = haystack_len - needle_len;
+
+  while (pos <= max_pos) {
+    if (fast_memcmp(needle, haystack + pos, needle_len) == 0) {
+      return pos;
+    }
+    pos += bad_char[(unsigned char)haystack[pos + needle_len - 1]];
+  }
+
+  return haystack_len + 1;
+}
+
+// Find the longest common substring - heavily optimized
+static unsigned long longest_commong_substring(input_buffers input,
+                                               unsigned long *match_indices,
+                                               memory_pool *pool) {
+
+  const unsigned int input_count = input.count;
+  const unsigned long min_len = input.min_len;
+
+  if (min_len == 0)
+    return 0;
+
+  const unsigned long input_len_0 = input.values[0].len;
+  const char *input_contents_0 = input.values[0].contents;
+  const bytes *input_values = input.values;
+
+  unsigned long *tmp_match_indices =
+      pool_alloc(pool, sizeof(unsigned long) * input_count);
+
+  unsigned long matched_len = 0;
+  unsigned long upper_bound = min_len;
+  unsigned long lower_bound = 1;
+
+  // Optimize: start with larger initial guess based on heuristic
+  unsigned long initial_guess = min_len / 4;
+  if (initial_guess > 16) {
+    lower_bound = initial_guess;
+  }
+
+  while (lower_bound <= upper_bound) {
+    unsigned long subset_len = (upper_bound + lower_bound) / 2;
+    unsigned long max_start = input_len_0 - subset_len;
+    int found = 0;
+
+    // Adaptive stride: larger for longer patterns
+    unsigned long stride = (subset_len > 32) ? (subset_len / 2) :
+                          (subset_len > 16) ? (subset_len / 4) : 1;
+
+    // Outer loop over first string
+    for (unsigned long start_index_1 = 0; start_index_1 <= max_start;
+         start_index_1 += stride) {
+      const char *needle = input_contents_0 + start_index_1;
+      unsigned int subset_index = input_count - 1;
+
+      // Check all other strings
+      while (subset_index > 0) {
+        const bytes *val = &input_values[subset_index];
+        const char *haystack = val->contents;
+        const unsigned long haystack_len = val->len;
+
+        // Use Boyer-Moore-Horspool for longer patterns, simple search for short
+        unsigned long pos;
+        if (subset_len > 8) {
+          pos = bmh_search(haystack, haystack_len, needle, subset_len);
+        } else {
+          pos = simple_search(haystack, haystack_len, needle, subset_len);
         }
+
+        if (pos > haystack_len - subset_len) {
+          break;
+        }
+
+        tmp_match_indices[subset_index] = pos;
+        subset_index--;
+      }
+
+      if (subset_index == 0) {
+        // Found match in all strings
+        memcpy(match_indices, tmp_match_indices,
+               sizeof(unsigned long) * input_count);
+        match_indices[0] = start_index_1;
+        matched_len = subset_len;
+        found = 1;
+        break;
+      }
     }
 
-    char stdout_buf[8192];
-    setvbuf(stdout, stdout_buf, _IOFBF, sizeof(stdout_buf));
+    // If stride search didn't find anything, do fine-grained search
+    if (!found && stride > 1) {
+      unsigned long search_start = (matched_len > 0) ?
+        (match_indices[0] > stride ? match_indices[0] - stride : 0) : 0;
+      unsigned long search_end = (matched_len > 0) ?
+        (match_indices[0] + stride < max_start ? match_indices[0] + stride : max_start) : max_start;
 
-    char** inputs;
-    unsigned long input_count = 0;
-    switch (source_type) {
-        case 1: {
-            // List all the files in the directory, and read the contents of each one into an entry in inputs
-            DIR *dir = opendir(source);
-            if (!dir) {
-                fprintf(stderr, "Error: Could not open directory %s\n", source);
-                exit(EXIT_FAILURE);
+      for (unsigned long start_index_1 = search_start; start_index_1 <= search_end;
+           start_index_1++) {
+        const char *needle = input_contents_0 + start_index_1;
+        unsigned int subset_index = input_count - 1;
+
+        while (subset_index > 0) {
+          const bytes *val = &input_values[subset_index];
+          const char *haystack = val->contents;
+          const unsigned long haystack_len = val->len;
+          unsigned long max_pos = haystack_len - subset_len;
+
+          unsigned long pos = 0;
+          int found_in_string = 0;
+
+          while (pos <= max_pos) {
+            if (fast_memcmp(needle, haystack + pos, subset_len) == 0) {
+              tmp_match_indices[subset_index] = pos;
+              found_in_string = 1;
+              break;
             }
-            // First, count the number of files in the directory
-            struct dirent* entry;
-            while ((entry = readdir(dir))) {
-                if (entry->d_type == DT_REG) {
-                    input_count++;
-                }
-            }
-            // Then, allocate the inputs array
-            inputs = malloc(sizeof(char*) * input_count);
-            // Then, read the contents of each file into an entry in inputs
-            rewinddir(dir);
-            unsigned long i = 0;
-            while ((entry = readdir(dir))) {
-                if (entry->d_type == DT_REG) {
-                    char* filename = malloc(sizeof(char) * FILENAME_MAX);
-                    snprintf(filename, FILENAME_MAX, "%s/%s", source, entry->d_name);
-                    FILE* file = fopen(filename, "r");
-                    if (!file) {
-                        fprintf(stderr, "Error: Could not open file %s\n", filename);
-                        exit(EXIT_FAILURE);
-                    }
-                    fseek(file, 0, SEEK_END);
-                    unsigned long file_size = ftell(file);
-                    rewind(file);
-                    inputs[i] = malloc(sizeof(char) * (file_size + 1));
-                    fread(inputs[i], sizeof(char), file_size, file);
-                    inputs[i][file_size] = '\0';
-                    fclose(file);
-                    free(filename);
-                    i++;
-                }
-            }
+            pos++;
+          }
+
+          if (!found_in_string) {
             break;
+          }
+          subset_index--;
         }
-        case 2: {
-            // read each line of the file into an entry in inputs
-            // First, open the file
-            FILE* file = fopen(source, "r");
-            if (!file) {
-                fprintf(stderr, "Error: Could not open file %s\n", source);
-                exit(EXIT_FAILURE);
-            }
-            // Then, count the number of lines in the file
-            char c;
-            while ((c = fgetc(file)) != EOF) {
-                if (c == '\n') {
-                    input_count++;
-                }
-            }
-            // Then, allocate the inputs array
-            inputs = malloc(sizeof(char*) * input_count);
-            // Then, read each line into an entry in inputs
-            rewind(file);
-            unsigned long i = 0;
-            unsigned long line_start = 0;
-            // Use strtok
-            char* line = NULL;
-            size_t line_len = 0;
-            while (getline(&line, &line_len, file) != -1) {
-                inputs[i] = malloc(sizeof(char) * (line_len + 1));
-                strcpy(inputs[i], line);
-                inputs[i][line_len] = '\0';
-                i++;
-            }
-            fclose(file);
-            break;
+
+        if (subset_index == 0) {
+          memcpy(match_indices, tmp_match_indices,
+                 sizeof(unsigned long) * input_count);
+          match_indices[0] = start_index_1;
+          matched_len = subset_len;
+          found = 1;
+          break;
         }
-        default: {
-            if (argc - arg_count < 1) {
-                fprintf(stderr, "Error: No input provided - provide inputs strings as arguments, or specify -d or -f to read from a directory or a file\n");
-                exit(EXIT_FAILURE);
-            }
-            inputs = argv + arg_count;
-            input_count = argc - arg_count;
-            break;
-        }
+      }
     }
-    struct input_struct input = {input_count, inputs};
 
-    process(input);
+    if (found) {
+      lower_bound = subset_len + 1;
+    } else {
+      upper_bound = subset_len - 1;
+    }
+  }
 
-    exit(EXIT_SUCCESS);
+  pool_free_last(pool, sizeof(unsigned long) * input_count);
+  return matched_len;
+}
+
+// Minimize the distance between the substrings - optimized
+static void minimize_distance(input_buffers *input,
+                              unsigned long *match_indices,
+                              unsigned long matched_len, memory_pool *pool) {
+
+  const unsigned int input_count = input->count;
+  const char *input_contents_0 = input->values[0].contents;
+  const char *pattern = input_contents_0 + match_indices[0];
+
+  // Allocate all buffers at once for better cache locality
+  unsigned long *match_counts =
+      pool_alloc(pool, sizeof(unsigned long) * input_count);
+  unsigned long *current_match_indices =
+      pool_alloc(pool, sizeof(unsigned long) * input_count);
+  unsigned long *best_match_indices =
+      pool_alloc(pool, sizeof(unsigned long) * input_count);
+
+  // Pre-allocate space for all match lists
+  unsigned long total_matches = 0;
+  unsigned long match_offsets[input_count];
+
+  // First pass: count matches using optimized search with first-char heuristic
+  char first_char = pattern[0];
+  for (unsigned int i = 0; i < input_count; i++) {
+    match_offsets[i] = total_matches;
+    const bytes *val = &input->values[i];
+    unsigned long count = 0;
+
+    // Use first-character heuristic for counting
+    for (unsigned long j = 0; j <= val->len - matched_len; j++) {
+      if (val->contents[j] == first_char &&
+          fast_memcmp(val->contents + j, pattern, matched_len) == 0) {
+        count++;
+      }
+    }
+
+    match_counts[i] = count;
+    total_matches += count;
+  }
+
+  // Early exit if only one match per string
+  int single_match = 1;
+  for (unsigned int i = 0; i < input_count; i++) {
+    if (match_counts[i] != 1) {
+      single_match = 0;
+      break;
+    }
+  }
+
+  if (single_match) {
+    pool_free_last(pool, sizeof(unsigned long) * input_count); // best
+    pool_free_last(pool, sizeof(unsigned long) * input_count); // current
+    pool_free_last(pool, sizeof(unsigned long) * input_count); // counts
+    return;
+  }
+
+  // Allocate single contiguous buffer for all matches
+  unsigned long *all_matches =
+      pool_alloc(pool, sizeof(unsigned long) * total_matches);
+  unsigned long **match_indices_list =
+      pool_alloc(pool, sizeof(unsigned long *) * input_count);
+
+  // Second pass: store matches
+  for (unsigned int i = 0; i < input_count; i++) {
+    match_indices_list[i] = all_matches + match_offsets[i];
+    const bytes *val = &input->values[i];
+    unsigned long count = 0;
+
+    for (unsigned long j = 0; j <= val->len - matched_len; j++) {
+      if (val->contents[j] == first_char &&
+          fast_memcmp(val->contents + j, pattern, matched_len) == 0) {
+        match_indices_list[i][count++] = j;
+      }
+    }
+
+    // Initialize to last match
+    current_match_indices[i] = match_indices_list[i][match_counts[i] - 1];
+  }
+
+  memcpy(best_match_indices, current_match_indices,
+         sizeof(unsigned long) * input_count);
+
+  unsigned long min_distance = ULONG_MAX;
+
+  // Optimize the distance minimization loop
+  while (1) {
+    unsigned long current_min = ULONG_MAX;
+    unsigned long current_max = 0;
+    unsigned int current_max_index = 0;
+
+    // Find min and max in one pass
+    for (unsigned int i = 0; i < input_count; i++) {
+      unsigned long val = current_match_indices[i];
+      if (val < current_min)
+        current_min = val;
+      if (val > current_max) {
+        current_max = val;
+        current_max_index = i;
+      }
+    }
+
+    unsigned long distance = current_max - current_min;
+    if (distance < min_distance) {
+      min_distance = distance;
+      memcpy(best_match_indices, current_match_indices,
+             sizeof(unsigned long) * input_count);
+    }
+
+    if (match_counts[current_max_index] == 0) {
+      break;
+    }
+
+    current_match_indices[current_max_index] =
+        match_indices_list[current_max_index]
+                          [--match_counts[current_max_index]];
+  }
+
+  memcpy(match_indices, best_match_indices,
+         sizeof(unsigned long) * input_count);
+
+  // Free in reverse order
+  pool_free_last(pool, sizeof(unsigned long *) * input_count);
+  pool_free_last(pool, sizeof(unsigned long) * total_matches);
+  pool_free_last(pool, sizeof(unsigned long) * input_count); // best
+  pool_free_last(pool, sizeof(unsigned long) * input_count); // current
+  pool_free_last(pool, sizeof(unsigned long) * input_count); // counts
+}
+
+// Process function - optimized with better memory management
+static void process(input_buffers *input, output_buffers *output,
+                    memory_pool *pool) {
+
+  const unsigned int input_count = input->count;
+  const unsigned long saved_min_len = input->min_len;
+
+  unsigned long *match_indices =
+      pool_alloc(pool, sizeof(unsigned long) * input_count);
+  unsigned long *saved_lengths =
+      pool_alloc(pool, sizeof(unsigned long) * input_count);
+
+  const unsigned long matched_len =
+      longest_commong_substring(*input, match_indices, pool);
+
+  if (matched_len == 0) {
+    add_variables(input, output);
+    pool_free_last(pool, sizeof(unsigned long) * input_count * 2);
+    return;
+  }
+
+  minimize_distance(input, match_indices, matched_len, pool);
+
+  // Save lengths
+  bytes *values = input->values;
+  for (unsigned int i = 0; i < input_count; i++) {
+    saved_lengths[i] = values[i].len;
+  }
+
+  // Process prefix
+  char nonempty = 0;
+  for (unsigned int i = 0; i < input_count; i++) {
+    unsigned long idx = match_indices[i];
+    if (idx > 0)
+      nonempty = 1;
+    values[i].len = idx;
+    if (idx < input->min_len) {
+      input->min_len = idx;
+    }
+  }
+
+  if (nonempty) {
+    process(input, output, pool);
+  }
+
+  // Restore
+  for (unsigned int i = 0; i < input_count; i++) {
+    values[i].len = saved_lengths[i];
+  }
+  input->min_len = saved_min_len;
+
+  add_constant(input, output, match_indices[0], matched_len);
+
+  // Process suffix
+  nonempty = 0;
+  for (unsigned int i = 0; i < input_count; i++) {
+    unsigned long offset = matched_len + match_indices[i];
+    if (offset < values[i].len)
+      nonempty = 1;
+    values[i].contents += offset;
+    unsigned long new_len = values[i].len - offset;
+    if (new_len < input->min_len) {
+      input->min_len = new_len;
+    }
+    values[i].len = new_len;
+  }
+
+  if (nonempty) {
+    process(input, output, pool);
+  }
+
+  // Restore
+  for (unsigned int i = 0; i < input_count; i++) {
+    values[i].contents -= matched_len + match_indices[i];
+  }
+  input->min_len = saved_min_len;
+
+  pool_free_last(pool, sizeof(unsigned long) * input_count * 2);
 }

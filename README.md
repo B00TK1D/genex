@@ -1,16 +1,38 @@
 # genex
-Generate regexes that tightly match input sets
 
-Build: `gcc -o genex genex.c && chmod +x genex`
+Generate tightly-fitting protocols from input sets using recursive longest substring division with minimized constant distance.
 
+## Example
+
+```go
+package main
+
+import (
+	"fmt"
+	genex "github.com/B00TK1D/genex"
+)
+
+func main() {
+	proto := genex.Genex([][]byte{
+		[]byte("the quick brown fox"),
+		[]byte("the slow brown dog"),
+		[]byte("the fast brown cat"),
+	})
+
+    for _, field := range proto.Field {
+		fmt.Printf("(")
+		for j, variable := range field.Variables {
+			if j > 0 {
+				fmt.Printf("|")
+			}
+			fmt.Printf("%s", variable)
+		}
+		fmt.Printf(")%s", field.Constant)
+	}
+}
 ```
-Usage: ./genex [-sSd:f:] [inputs...]
-  -s: Strict mode - do not attempt to expand charsets based on statistical analysis and common charsets
-  -S: Very strict mode - do not merge variables from different inputs into combined charsets
-  -d <directory>: Read inputs from a directory (every file in directory is read as its own input)
-  -f <file>: Read inputs from a file (every line in file is read as its own input)
+
+Output:
 ```
-
-Examples:
-
-`./genex -d tests/long_http`
+(||)the (quick|slow|fast) brown (fox|dog|cat)
+```
