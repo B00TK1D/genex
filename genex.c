@@ -171,60 +171,6 @@ typedef struct {
   bytes **variables;
 } output_buffers;
 
-// Print bytes - optimized to avoid temporary allocation for small strings
-static void print_bytes(bytes b) {
-  if (b.contents == NULL) {
-    return;
-  }
-
-  // For small strings, use stack buffer
-  if (b.len < 4096) {
-    char tmpContents[4096];
-    memcpy(tmpContents, b.contents, b.len);
-    tmpContents[b.len] = 0;
-    fprintf(stderr, "%s", tmpContents);
-  } else {
-    // For large strings, allocate temporarily
-    memory_pool tmp_pool;
-    pool_init(&tmp_pool, b.len + 1);
-    char *tmpContents = pool_alloc(&tmp_pool, b.len + 1);
-    memcpy(tmpContents, b.contents, b.len);
-    tmpContents[b.len] = 0;
-    fprintf(stderr, "%s", tmpContents);
-    pool_destroy(&tmp_pool);
-  }
-}
-
-static void print_output(output_buffers *output) {
-  const unsigned int input_count = output->input_count;
-  const unsigned int const_count = output->const_count;
-
-  for (unsigned long const_i = 0; const_i < const_count; const_i++) {
-    fprintf(stderr, "(");
-    for (unsigned int input_i = 0; input_i < input_count; input_i++) {
-      if (input_i > 0) {
-        fprintf(stderr, "|");
-      }
-      print_bytes(output->variables[const_i][input_i]);
-    }
-    fprintf(stderr, ")");
-    print_bytes(output->constants[const_i]);
-  }
-  fprintf(stderr, "\n");
-}
-
-static void print_input(input_buffers *input) {
-  const unsigned int input_count = input->count;
-  const bytes *values = input->values;
-
-  for (int i = 0; i < input_count; i++) {
-    fprintf(stderr, "%d: ", i);
-    print_bytes(values[i]);
-    fprintf(stderr, "\n");
-  }
-  fprintf(stderr, "\n");
-}
-
 static inline void add_variables(input_buffers *input, output_buffers *output) {
   const unsigned int input_count = input->count;
   const unsigned long const_count = output->const_count;
