@@ -146,17 +146,59 @@ static inline void add_variables(input_buffers *input, output_buffers *output) {
   const bytes *input_values = input->values;
   bytes **output_values = output->variables;
 
-  // Unroll for common cases
+  // Check if all inputs are empty - if so, don't add anything
+  char all_empty = 1;
+  for (unsigned int input_i = 0; input_i < input_count; input_i++) {
+    if (input_values[input_i].len > 0) {
+      all_empty = 0;
+      break;
+    }
+  }
+
+  if (all_empty) {
+    return;
+  }
+
+  // Add variables
   bytes *out = output_values[const_count];
   for (unsigned int input_i = 0; input_i < input_count; input_i++) {
     out[input_i].len = input_values[input_i].len;
     out[input_i].contents = input_values[input_i].contents;
   }
+
+  // Set empty constant
+  bytes *con = &output->constants[const_count];
+  con->len = 0;
+  con->contents = NULL;
+
+  // Increment count
+  output->const_count++;
 }
 
 static inline void add_constant(input_buffers *input, output_buffers *output,
                                 unsigned long match_index,
                                 unsigned long matched_len) {
+
+  bytes **output_values = output->variables;
+  const unsigned int input_count = input->count;
+
+  // Check if the previous field has empty constant and we should update it
+  if (output->const_count > 0) {
+    bytes *prev_con = &output->constants[output->const_count - 1];
+    if (prev_con->len == 0 && prev_con->contents == NULL) {
+      // Previous field has empty constant, update it
+      prev_con->len = matched_len;
+      prev_con->contents = input->values[0].contents + match_index;
+      return;
+    }
+  }
+
+  // Otherwise, create a new field with empty variables
+  bytes *vars = output_values[output->const_count];
+  for (unsigned int i = 0; i < input_count; i++) {
+    vars[i].len = 0;
+    vars[i].contents = NULL;
+  }
 
   bytes *con = &output->constants[output->const_count];
   con->len = matched_len;
@@ -174,12 +216,21 @@ static inline int fast_memcmp(const char *s1, const char *s2, unsigned long n) {
     return 0;
   }
 
-  if (n <= 8) {
-    // Use 64-bit comparison
+  if (n == 8) {
+    // Use 64-bit comparison for exactly 8 bytes
     uint64_t v1, v2;
     memcpy(&v1, s1, 8);
     memcpy(&v2, s2, 8);
     return v1 != v2;
+  }
+
+  if (n < 8) {
+    // For 5-7 bytes, compare byte by byte to avoid reading beyond bounds
+    for (unsigned long i = 0; i < n; i++) {
+      if (s1[i] != s2[i])
+        return 1;
+    }
+    return 0;
   }
 
   if (n <= 16) {
@@ -600,92 +651,4 @@ static void process(input_buffers *input, output_buffers *output,
   input->min_len = saved_min_len;
 
   pool_free_last(pool, sizeof(unsigned long) * input_count * 2);
-}
-
-output_buffers genex(input_buffers *input) {
-  memory_pool pool;
-  pool_init(&pool, 1 * 1024 * 1024);
-
-  bytes *output_constants = pool_alloc(&pool, sizeof(bytes) * input->min_len);
-  bytes **output_vars = pool_alloc(&pool, sizeof(bytes *) * input->min_len);
-  bytes *var_list = pool_alloc(&pool, sizeof(bytes) * input->count * input->min_len);
-
-  for (unsigned int j = 0; j < input->min_len; j++) {
-    output_vars[j] = var_list + j * input->count;
-  }
-
-  output_buffers output = {input->count, 0, output_constants, output_vars};
-
-  process(input, &output, &pool);
-
-  output.const_count++;
-
-  pool_destroy(&pool);
-  return output;
-}
-
-int test(int argc, char **argv) {
-
-  char **inputs;
-  unsigned long input_count = 0;
-  if (argc < 2) {
-    fprintf(stderr, "Error: No input provided\n");
-    exit(EXIT_FAILURE);
-  }
-  inputs = argv + 1;
-  input_count = argc - 1;
-
-  const unsigned long test_count = 10000;
-
-  // Pre-calculate input lengths once
-  unsigned long *input_lengths = malloc(sizeof(unsigned long) * input_count);
-  unsigned long max_len = 0;
-  unsigned long min_len = ULONG_MAX;
-
-  for (unsigned int i = 0; i < input_count; i++) {
-    unsigned long len = strlen(inputs[i]);
-    input_lengths[i] = len;
-    if (len < min_len)
-      min_len = len;
-    if (len > max_len)
-      max_len = len;
-  }
-
-  // Initialize memory pool with larger size for better performance
-  memory_pool pool;
-  pool_init(&pool, 1 * 1024 * 1024);
-
-  for (unsigned long i = 0; i < test_count; i++) {
-    // Reset pool for each iteration
-    pool_reset(&pool);
-
-    // Allocate structures for this iteration
-    bytes *input_values = pool_alloc(&pool, sizeof(bytes) * input_count);
-    bytes *output_constants = pool_alloc(&pool, sizeof(bytes) * min_len);
-    bytes **output_vars = pool_alloc(&pool, sizeof(bytes *) * min_len);
-    bytes *var_list = pool_alloc(&pool, sizeof(bytes) * input_count * min_len);
-
-    for (unsigned int j = 0; j < min_len; j++) {
-      output_vars[j] = var_list + j * input_count;
-    }
-
-    // Initialize input values
-    for (unsigned int j = 0; j < input_count; j++) {
-      input_values[j].len = input_lengths[j];
-      input_values[j].contents = inputs[j];
-    }
-
-    input_buffers input = {input_count, min_len, max_len, input_values};
-    output_buffers output = {input_count, 0, output_constants, output_vars};
-
-    process(&input, &output, &pool);
-
-    if (i == test_count - 1) {
-      print_output(&output);
-    }
-  }
-
-  free(input_lengths);
-  pool_destroy(&pool);
-  exit(EXIT_SUCCESS);
 }

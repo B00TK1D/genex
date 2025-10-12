@@ -6,15 +6,28 @@ import (
 )
 
 func printProtocol(p genex.Protocol) {
-	for _, field := range p.Field {
-		fmt.Printf("(")
-		for j, variable := range field.Variables {
-			if j > 0 {
-				fmt.Printf("|")
+	for i, field := range p.Field {
+		empty := false
+		if i == 0 {
+			empty = true
+			for _, b := range field.Variables {
+				if len(b) > 0 {
+					empty = false
+					break
+				}
 			}
-			fmt.Printf("%s", variable)
 		}
-		fmt.Printf(")%s", field.Constant)
+		if !empty {
+			fmt.Printf("(")
+			for j, variable := range field.Variables {
+				if j > 0 {
+					fmt.Printf("|")
+				}
+				fmt.Printf("%s", variable)
+			}
+			fmt.Printf(")")
+		}
+		fmt.Printf("%s", field.Constant)
 	}
 }
 

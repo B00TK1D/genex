@@ -81,8 +81,6 @@ func Genex(inputs [][]byte) Protocol {
 	// Call process
 	C.process(&input, &output, &pool)
 
-	output.const_count++
-
 	// Generate Go structures from C output
 	constantsSlice := (*[1 << 30]C.bytes)(unsafe.Pointer(output.constants))[:output.const_count:output.const_count]
 	for i := 0; i < int(output.const_count); i++ {
